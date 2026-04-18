@@ -1,0 +1,47 @@
+import DataSourcePanel from './components/DataSourcePanel'
+import ParameterPanel from './components/ParameterPanel'
+import StatsPanel from './components/StatsPanel'
+import EquityCurve from './components/EquityCurve'
+import CandleChart from './components/CandleChart'
+import TradeLog from './components/TradeLog'
+import Breakdowns from './components/Breakdowns'
+
+export default function App() {
+  return (
+    <div className="min-h-full">
+      <header className="border-b border-border bg-panel/60 backdrop-blur sticky top-0 z-10">
+        <div className="max-w-[1700px] mx-auto px-4 py-3 flex items-center justify-between">
+          <h1 className="text-lg font-semibold tracking-tight">
+            VWAP + EMA Pullback <span className="text-accent">Backtest</span>
+          </h1>
+          <div className="text-xs text-gray-400">Day-trading research dashboard</div>
+        </div>
+      </header>
+
+      <main className="max-w-[1700px] mx-auto px-4 py-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <aside className="lg:col-span-3 space-y-4">
+          <DataSourcePanel />
+          <ParameterPanel />
+        </aside>
+
+        <section className="lg:col-span-6 space-y-4">
+          <EquityCurve />
+          <CandleChart />
+          <Breakdowns />
+        </section>
+
+        <aside className="lg:col-span-3 space-y-4">
+          <StatsPanel />
+        </aside>
+
+        <div className="lg:col-span-12">
+          <TradeLog />
+        </div>
+      </main>
+
+      <footer className="border-t border-border py-4 text-center text-xs text-gray-500">
+        Built for research purposes only — not financial advice.
+      </footer>
+    </div>
+  )
+}
