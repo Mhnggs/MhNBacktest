@@ -20,26 +20,53 @@ REQUIRED_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
 
 
 def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Map MT-style headers to canonical names.
+
+    MT5 exports include both `<TICKVOL>` and `<VOL>` — prefer TICKVOL because
+    real volume is almost always 0 for forex. Each canonical name only takes
+    the first matching source column to avoid creating duplicates.
+    """
     rename_map = {}
+    used = set()
+
+    def claim(col, name):
+        if name in used:
+            return False
+        rename_map[col] = name
+        used.add(name)
+        return True
+
+    # Prefer TICKVOL over VOL when both are present.
+    has_tickvol = any(
+        str(c).strip().lower().lstrip("<").rstrip(">") in {"tickvol", "tick_volume"}
+        for c in df.columns
+    )
+
     for col in df.columns:
         key = str(col).strip().lower().lstrip("<").rstrip(">")
-        if key in {"date", "<date>"}:
-            rename_map[col] = "date"
-        elif key in {"time", "<time>"}:
-            rename_map[col] = "time"
+        if key == "date":
+            claim(col, "date")
+        elif key == "time":
+            claim(col, "time")
         elif key in {"datetime", "timestamp", "date_time"}:
-            rename_map[col] = "datetime"
+            claim(col, "datetime")
         elif key in {"open", "o"}:
-            rename_map[col] = "open"
+            claim(col, "open")
         elif key in {"high", "h"}:
-            rename_map[col] = "high"
+            claim(col, "high")
         elif key in {"low", "l"}:
-            rename_map[col] = "low"
+            claim(col, "low")
         elif key in {"close", "c"}:
-            rename_map[col] = "close"
-        elif key in {"volume", "vol", "tickvol", "tick_volume", "v"}:
-            rename_map[col] = "volume"
-    return df.rename(columns=rename_map)
+            claim(col, "close")
+        elif key in {"tickvol", "tick_volume"}:
+            claim(col, "volume")
+        elif key in {"volume", "vol", "v"} and not has_tickvol:
+            claim(col, "volume")
+
+    renamed = df.rename(columns=rename_map)
+    # Drop any columns we didn't claim so duplicate canonical names can't sneak through.
+    keep = [c for c in renamed.columns if c in used]
+    return renamed[keep]
 
 
 def _detect_separator(raw: str) -> str:
