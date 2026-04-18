@@ -5,9 +5,10 @@ const api = axios.create({
   timeout: 120000,
 })
 
-export async function uploadCsv(files) {
+export async function uploadCsv(files, sourceTz = 'UTC') {
   const form = new FormData()
   files.forEach((f) => form.append('files', f))
+  form.append('source_tz', sourceTz)
   const res = await api.post('/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })

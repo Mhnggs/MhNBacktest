@@ -46,18 +46,38 @@ export default function DataSourcePanel() {
   )
 }
 
+const BROKER_TZ_OPTIONS = [
+  { value: 'UTC', label: 'UTC' },
+  { value: 'Etc/GMT-2', label: 'GMT+2 (winter EU broker)' },
+  { value: 'Etc/GMT-3', label: 'GMT+3 (most MT5 brokers — IC Markets, Pepperstone, FXCM)' },
+  { value: 'Etc/GMT-4', label: 'GMT+4' },
+  { value: 'Etc/GMT-5', label: 'GMT+5' },
+  { value: 'Europe/London', label: 'Europe/London' },
+  { value: 'Europe/Berlin', label: 'Europe/Berlin (CET)' },
+  { value: 'America/New_York', label: 'America/New_York' },
+  { value: 'Asia/Karachi', label: 'Asia/Karachi (PKT)' },
+  { value: 'Asia/Dubai', label: 'Asia/Dubai' },
+]
+
 function UploadPanel() {
   const setSession = useBacktestStore((s) => s.setSession)
   const inputRef = useRef(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
+  const [sourceTz, setSourceTz] = useState(
+    localStorage.getItem('mt_source_tz') || 'Etc/GMT-3',
+  )
+
+  useEffect(() => {
+    localStorage.setItem('mt_source_tz', sourceTz)
+  }, [sourceTz])
 
   async function handleFiles(files) {
     if (!files || !files.length) return
     setBusy(true)
     setErr(null)
     try {
-      const data = await uploadCsv(Array.from(files))
+      const data = await uploadCsv(Array.from(files), sourceTz)
       setSession({
         sessionId: data.session_id,
         summary: data,
@@ -72,7 +92,18 @@ function UploadPanel() {
   }
 
   return (
-    <div>
+    <div className="space-y-2">
+      <div>
+        <div className="label">Broker Server Timezone</div>
+        <select className="input" value={sourceTz} onChange={(e) => setSourceTz(e.target.value)}>
+          {BROKER_TZ_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <div className="text-[10px] text-gray-500 mt-1">
+          Tip: open MT5 → Market Watch and compare server clock to your local time. The CSV times are in this timezone.
+        </div>
+      </div>
       <label
         className="block border border-dashed border-border rounded-lg p-4 text-center cursor-pointer hover:border-accent"
         onDragOver={(e) => e.preventDefault()}
@@ -92,9 +123,9 @@ function UploadPanel() {
         <div className="text-sm text-gray-300">
           {busy ? 'Uploading...' : 'Drop MT CSV files here or click to browse'}
         </div>
-        <div className="text-xs text-gray-500 mt-1">Supports comma, semicolon, tab separators</div>
+        <div className="text-xs text-gray-500 mt-1">Comma, semicolon, or tab separated</div>
       </label>
-      {err && <div className="text-bad text-xs mt-2">{err}</div>}
+      {err && <div className="text-bad text-xs">{err}</div>}
     </div>
   )
 }

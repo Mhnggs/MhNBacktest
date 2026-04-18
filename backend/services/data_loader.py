@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
+import pytz
 import requests
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
@@ -50,8 +51,12 @@ def _detect_separator(raw: str) -> str:
     return ","
 
 
-def parse_mt_csv(raw_bytes: bytes) -> pd.DataFrame:
-    """Parse a MetaTrader-style CSV export into a normalised OHLCV DataFrame."""
+def parse_mt_csv(raw_bytes: bytes, source_tz: str = "UTC") -> pd.DataFrame:
+    """Parse a MetaTrader-style CSV export into a normalised OHLCV DataFrame.
+
+    `source_tz` should match your MT broker's server time (commonly 'Etc/GMT-3'
+    for MT5 brokers on GMT+3 server time). The result is UTC tz-aware.
+    """
     text = raw_bytes.decode("utf-8-sig", errors="replace")
     sep = _detect_separator(text)
     df = pd.read_csv(io.StringIO(text), sep=sep, engine="python")
@@ -82,6 +87,15 @@ def parse_mt_csv(raw_bytes: bytes) -> pd.DataFrame:
     df = df.dropna(subset=["datetime", "open", "high", "low", "close"])
     df = df[REQUIRED_COLUMNS].sort_values("datetime").reset_index(drop=True)
     df["volume"] = df["volume"].fillna(0.0)
+
+    tz = pytz.timezone(source_tz)
+    df["datetime"] = (
+        df["datetime"]
+        .dt.tz_localize(tz, nonexistent="shift_forward", ambiguous="NaT")
+        .dt.tz_convert("UTC")
+    )
+    df = df.dropna(subset=["datetime"]).reset_index(drop=True)
+    df.attrs["source_tz"] = source_tz
     return df
 
 
