@@ -55,4 +55,5 @@ def run(req: BacktestRequest):
         "dow_breakdown": dow_breakdown(result["trades"]),
         "hourly_breakdown": hourly_breakdown(result["trades"]),
         "candles": candles,
+        "diagnostics": result.get("diagnostics", {}),
     }

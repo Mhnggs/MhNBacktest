@@ -124,7 +124,9 @@ def fetch_twelvedata(
 
     cache_path = _cache_key(symbol, interval, start_date, end_date)
     if use_cache and cache_path.exists():
-        return pd.read_csv(cache_path, parse_dates=["datetime"])
+        cached = pd.read_csv(cache_path)
+        cached["datetime"] = pd.to_datetime(cached["datetime"], utc=True)
+        return cached
 
     url = "https://api.twelvedata.com/time_series"
     all_rows: list[dict] = []
@@ -141,6 +143,7 @@ def fetch_twelvedata(
             "format": "JSON",
             "outputsize": page_size,
             "order": "asc",
+            "timezone": "UTC",
         }
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
@@ -171,10 +174,11 @@ def fetch_twelvedata(
         if col not in df.columns:
             df[col] = 0.0
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
     df = df.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
     df = df[REQUIRED_COLUMNS]
     df["volume"] = df["volume"].fillna(0.0)
+    df.attrs["source_tz"] = "UTC"
 
     if use_cache:
         df.to_csv(cache_path, index=False)

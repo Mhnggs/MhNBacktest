@@ -1,6 +1,7 @@
 import DataSourcePanel from './components/DataSourcePanel'
 import ParameterPanel from './components/ParameterPanel'
 import StatsPanel from './components/StatsPanel'
+import Diagnostics from './components/Diagnostics'
 import EquityCurve from './components/EquityCurve'
 import CandleChart from './components/CandleChart'
 import TradeLog from './components/TradeLog'
@@ -32,6 +33,7 @@ export default function App() {
 
         <aside className="lg:col-span-3 space-y-4">
           <StatsPanel />
+          <Diagnostics />
         </aside>
 
         <div className="lg:col-span-12">

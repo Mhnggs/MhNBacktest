@@ -108,10 +108,24 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
     work = df.copy()
     if not isinstance(work["datetime"].dtype, pd.DatetimeTZDtype):
-        # Assume naive timestamps are in the configured timezone, then convert to UTC.
-        tz = pytz.timezone(params.timezone)
-        work["datetime"] = work["datetime"].dt.tz_localize(tz, nonexistent="shift_forward", ambiguous="NaT").dt.tz_convert("UTC")
+        # Treat naive timestamps as the dataset's source tz (UTC by default).
+        # MetaTrader exports often use the broker's local time — see README for that case.
+        source_tz = df.attrs.get("source_tz", "UTC")
+        tz = pytz.timezone(source_tz)
+        work["datetime"] = (
+            work["datetime"]
+            .dt.tz_localize(tz, nonexistent="shift_forward", ambiguous="NaT")
+            .dt.tz_convert("UTC")
+        )
         work = work.dropna(subset=["datetime"]).reset_index(drop=True)
+    else:
+        work["datetime"] = work["datetime"].dt.tz_convert("UTC")
+
+    # Auto-disable volume filter if the dataset has no real volume info
+    # (common for forex / CFDs returned by TwelveData).
+    effective_require_volume = params.require_volume
+    if effective_require_volume and float(df["volume"].sum()) <= 0:
+        effective_require_volume = False
 
     work = build_indicator_frame(
         work,
@@ -135,6 +149,17 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     daily_count: dict = {}
     next_id = 1
     tick = params.tick_size
+
+    diag = {
+        "total_bars": 0, "in_session_bars": 0, "candidate_bars": 0,
+        "rejected_vwap_side": 0, "rejected_ema_slope": 0,
+        "rejected_ema_touch": 0, "rejected_candle_dir": 0,
+        "rejected_volume": 0, "rejected_vwap_distance": 0,
+        "rejected_chop": 0, "rejected_pattern": 0,
+        "rejected_max_per_day": 0, "rejected_open_trade": 0,
+        "long_signals": 0, "short_signals": 0,
+        "volume_filter_active": effective_require_volume,
+    }
 
     rows = work.to_dict("records")
     n = len(rows)
@@ -231,42 +256,68 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
         equity_curve.append({"datetime": ts.isoformat(), "equity": equity})
 
+        diag["total_bars"] += 1
+
         if open_trade is not None:
+            diag["rejected_open_trade"] += 1
             continue
         if not bar["_in_session"]:
             continue
+        diag["in_session_bars"] += 1
         if daily_count.get(session_date, 0) >= params.max_trades_per_day:
+            diag["rejected_max_per_day"] += 1
             continue
         if pd.isna(bar.get("ema_fast")) or pd.isna(bar.get("vwap")):
             continue
+        diag["candidate_bars"] += 1
 
-        # ---- Long signal ----
-        long_cond = (
-            bar["close"] > bar["vwap"]
-            and bar["ema_fast_slope"] is not None
-            and bar["ema_fast_slope"] > params.min_ema_slope
-            and prev["low"] <= bar["ema_fast"] * (1 + params.ema_touch_pct)
-            and bar["close"] > bar["open"]
-            and (not params.require_volume or bar["vol_ratio"] >= params.volume_multiplier)
-            and (bar["close"] - bar["vwap"]) / bar["vwap"] * 100 <= params.vwap_max_distance_pct
-            and bar["vwap_crossings"] <= params.chop_filter_crossings
-            and (not params.require_pattern or bool(bar["bullish_pattern"]))
-        )
+        slope = bar.get("ema_fast_slope")
+        slope_ok_long = slope is not None and not pd.isna(slope) and slope > params.min_ema_slope
+        slope_ok_short = slope is not None and not pd.isna(slope) and slope < -params.min_ema_slope
 
-        # ---- Short signal ----
-        short_cond = (
-            bar["close"] < bar["vwap"]
-            and bar["ema_fast_slope"] is not None
-            and bar["ema_fast_slope"] < -params.min_ema_slope
-            and prev["high"] >= bar["ema_fast"] * (1 - params.ema_touch_pct)
-            and bar["close"] < bar["open"]
-            and (not params.require_volume or bar["vol_ratio"] >= params.volume_multiplier)
-            and (bar["vwap"] - bar["close"]) / bar["vwap"] * 100 <= params.vwap_max_distance_pct
-            and bar["vwap_crossings"] <= params.chop_filter_crossings
-            and (not params.require_pattern or bool(bar["bearish_pattern"]))
-        )
+        long_checks = {
+            "vwap_side": bar["close"] > bar["vwap"],
+            "ema_slope": slope_ok_long,
+            "ema_touch": prev["low"] <= bar["ema_fast"] * (1 + params.ema_touch_pct),
+            "candle_dir": bar["close"] > bar["open"],
+            "volume": (not effective_require_volume) or bar["vol_ratio"] >= params.volume_multiplier,
+            "vwap_distance": (bar["close"] - bar["vwap"]) / bar["vwap"] * 100 <= params.vwap_max_distance_pct,
+            "chop": bar["vwap_crossings"] <= params.chop_filter_crossings,
+            "pattern": (not params.require_pattern) or bool(bar["bullish_pattern"]),
+        }
+        short_checks = {
+            "vwap_side": bar["close"] < bar["vwap"],
+            "ema_slope": slope_ok_short,
+            "ema_touch": prev["high"] >= bar["ema_fast"] * (1 - params.ema_touch_pct),
+            "candle_dir": bar["close"] < bar["open"],
+            "volume": (not effective_require_volume) or bar["vol_ratio"] >= params.volume_multiplier,
+            "vwap_distance": (bar["vwap"] - bar["close"]) / bar["vwap"] * 100 <= params.vwap_max_distance_pct,
+            "chop": bar["vwap_crossings"] <= params.chop_filter_crossings,
+            "pattern": (not params.require_pattern) or bool(bar["bearish_pattern"]),
+        }
+
+        long_cond = all(long_checks.values())
+        short_cond = all(short_checks.values())
+
+        # Track which filter most often blocks signals (only count when not in trade)
+        if not long_cond and not short_cond:
+            for name, ok in long_checks.items():
+                if not ok:
+                    diag[f"rejected_{name if name != 'vwap_side' else 'vwap_side'}"] = (
+                        diag.get(f"rejected_{name}", 0)
+                    )
+            # Use whichever side had the most filters passing as the "intended" direction
+            long_pass = sum(long_checks.values())
+            short_pass = sum(short_checks.values())
+            checks = long_checks if long_pass >= short_pass else short_checks
+            for name, ok in checks.items():
+                if not ok:
+                    key = f"rejected_{name}"
+                    diag[key] = diag.get(key, 0) + 1
+                    break  # only count the first failing filter per bar
 
         if long_cond:
+            diag["long_signals"] += 1
             entry = bar["high"] + tick
             stop = bar["low"] - params.stop_buffer_ticks * tick
             risk_per_unit = entry - stop
@@ -285,6 +336,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             daily_count[session_date] = daily_count.get(session_date, 0) + 1
 
         elif short_cond:
+            diag["short_signals"] += 1
             entry = bar["low"] - tick
             stop = bar["high"] + params.stop_buffer_ticks * tick
             risk_per_unit = stop - entry
@@ -305,4 +357,5 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     return {
         "trades": [t.to_dict() for t in trades],
         "equity_curve": equity_curve,
+        "diagnostics": diag,
     }
