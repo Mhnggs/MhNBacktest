@@ -25,10 +25,13 @@ def run(req: BacktestRequest):
         raise HTTPException(404, "Session not found. Upload data or fetch first.")
 
     df = session["df"].copy()
+    tz_aware = isinstance(df["datetime"].dtype, pd.DatetimeTZDtype)
     if req.start_date:
-        df = df[df["datetime"] >= pd.to_datetime(req.start_date)]
+        start_ts = pd.to_datetime(req.start_date, utc=tz_aware)
+        df = df[df["datetime"] >= start_ts]
     if req.end_date:
-        df = df[df["datetime"] <= pd.to_datetime(req.end_date)]
+        end_ts = pd.to_datetime(req.end_date, utc=tz_aware)
+        df = df[df["datetime"] <= end_ts]
     df = df.reset_index(drop=True)
 
     if df.empty:
