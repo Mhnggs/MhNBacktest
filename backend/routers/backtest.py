@@ -8,7 +8,12 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 
-from ..models.schemas import BacktestRequest, OptimizeRequest, WalkForwardRequest
+from ..models.schemas import (
+    AutoRobustRequest,
+    BacktestRequest,
+    OptimizeRequest,
+    WalkForwardRequest,
+)
 from ..services.performance import (
     compute_stats,
     dow_breakdown,
@@ -316,4 +321,174 @@ def walkforward(req: WalkForwardRequest):
         "test_bars": int(len(test_df)),
         "consistency": consistency,
         "session_markers": _session_markers(params),
+    }
+
+
+AUTO_ROBUST_MAX_COMBOS = 500
+
+
+def _run_stats_only(df: pd.DataFrame, params: StrategyParams) -> dict:
+    result = run_backtest(df, params)
+    stats = compute_stats(
+        result["trades"], result["equity_curve"], params.starting_capital,
+    )
+    return stats
+
+
+def _tier_rank(tier: str) -> int:
+    return {"good": 0, "warn": 1, "unknown": 2, "bad": 3}.get(tier, 4)
+
+
+@router.post("/auto_robust")
+def auto_robust(req: AutoRobustRequest):
+    """Sweep → rank by primary metric → walk-forward the top-K → return only
+    the configurations that survived as ROBUST / MARGINAL.
+
+    The user spec: "pick params and ranges, get a ranked table of what
+    actually worked out-of-sample" — no heatmap interpretation required.
+    """
+    if not req.sweeps:
+        raise HTTPException(400, "At least one sweep axis is required")
+    if len(req.sweeps) > 3:
+        raise HTTPException(400, "Up to 3 sweep axes supported")
+    keys = [s.key for s in req.sweeps]
+    for k in keys:
+        if k not in OPTIMIZE_ALLOWED_PARAMS:
+            raise HTTPException(400, f"Param '{k}' not sweepable")
+    if len(set(keys)) != len(keys):
+        raise HTTPException(400, "Duplicate param keys in sweeps")
+    if req.primary_metric not in OPTIMIZE_METRICS:
+        raise HTTPException(400, f"primary_metric must be one of {sorted(OPTIMIZE_METRICS)}")
+
+    coerced = [[_coerce(s.key, v) for v in s.values] for s in req.sweeps]
+    total = 1
+    for vs in coerced:
+        if not vs:
+            raise HTTPException(400, "Each sweep axis must have at least one value")
+        total *= len(vs)
+    if total > AUTO_ROBUST_MAX_COMBOS:
+        raise HTTPException(
+            400,
+            f"{total} combinations exceeds cap of {AUTO_ROBUST_MAX_COMBOS}. Widen the step.",
+        )
+
+    df = _load_filtered_df(req)
+    base_params = req.params.model_dump()
+
+    # ---- Phase 1: full-period scoring ----
+    from itertools import product
+
+    candidates: list[dict] = []
+    for combo in product(*coerced):
+        overrides = dict(zip(keys, combo))
+        params = StrategyParams(**{**base_params, **overrides})
+        try:
+            stats = _run_stats_only(df, params)
+        except Exception as exc:  # noqa: BLE001
+            candidates.append({
+                "overrides": overrides,
+                "error": str(exc),
+                "metric_value": float("-inf"),
+            })
+            continue
+        candidates.append({
+            "overrides": overrides,
+            "full_stats": {
+                "total_trades": int(stats.get("total_trades") or 0),
+                "win_rate": float(stats.get("win_rate") or 0.0),
+                "profit_factor": float(stats.get("profit_factor") or 0.0),
+                "sharpe_ratio": float(stats.get("sharpe_ratio") or 0.0),
+                "total_return_pct": float(stats.get("total_return_pct") or 0.0),
+                "max_drawdown_pct": float(stats.get("max_drawdown_pct") or 0.0),
+            },
+            "metric_value": float(stats.get(req.primary_metric) or 0.0),
+        })
+
+    scored = [c for c in candidates if "error" not in c]
+    scored.sort(key=lambda c: c["metric_value"], reverse=True)
+    top = scored[: req.top_k]
+
+    # ---- Phase 2: walk-forward validation of the top-K ----
+    n = len(df)
+    split_idx = max(1, min(n - 1, int(n * req.train_pct)))
+    train_df = df.iloc[:split_idx].reset_index(drop=True)
+    test_df = df.iloc[split_idx:].reset_index(drop=True)
+    if train_df.empty or test_df.empty:
+        raise HTTPException(400, "Not enough data to split into train/test")
+    split_datetime = str(df.iloc[split_idx]["datetime"])
+
+    validated: list[dict] = []
+    for rank, cand in enumerate(top, start=1):
+        params = StrategyParams(**{**base_params, **cand["overrides"]})
+        try:
+            train_stats = _run_stats_only(train_df, params)
+            test_stats = _run_stats_only(test_df, params)
+        except Exception as exc:  # noqa: BLE001
+            validated.append({
+                **cand,
+                "rank": rank,
+                "error": str(exc),
+            })
+            continue
+
+        consistency = _consistency_score(train_stats, test_stats)
+        robust_enough = (
+            consistency["tier"] in ("good", "warn")
+            and int(test_stats.get("total_trades") or 0) >= req.min_test_trades
+        )
+
+        validated.append({
+            "rank": rank,
+            "params": cand["overrides"],
+            "full_stats": cand["full_stats"],
+            "train_stats": {
+                "total_trades": int(train_stats.get("total_trades") or 0),
+                "win_rate": float(train_stats.get("win_rate") or 0.0),
+                "profit_factor": float(train_stats.get("profit_factor") or 0.0),
+                "sharpe_ratio": float(train_stats.get("sharpe_ratio") or 0.0),
+                "total_return_pct": float(train_stats.get("total_return_pct") or 0.0),
+                "max_drawdown_pct": float(train_stats.get("max_drawdown_pct") or 0.0),
+            },
+            "test_stats": {
+                "total_trades": int(test_stats.get("total_trades") or 0),
+                "win_rate": float(test_stats.get("win_rate") or 0.0),
+                "profit_factor": float(test_stats.get("profit_factor") or 0.0),
+                "sharpe_ratio": float(test_stats.get("sharpe_ratio") or 0.0),
+                "total_return_pct": float(test_stats.get("total_return_pct") or 0.0),
+                "max_drawdown_pct": float(test_stats.get("max_drawdown_pct") or 0.0),
+            },
+            "consistency": consistency,
+            "robust_enough": robust_enough,
+        })
+
+    # Re-rank: passing rows (ROBUST then MARGINAL) by test Sharpe desc,
+    # failing rows after them sorted the same way.
+    validated.sort(
+        key=lambda r: (
+            _tier_rank(r.get("consistency", {}).get("tier", "")),
+            -float(r.get("test_stats", {}).get("sharpe_ratio") or 0.0),
+        )
+    )
+    for i, r in enumerate(validated, start=1):
+        r["rank"] = i
+
+    tier_counts = {"good": 0, "warn": 0, "bad": 0, "unknown": 0}
+    for r in validated:
+        t = r.get("consistency", {}).get("tier", "unknown")
+        tier_counts[t] = tier_counts.get(t, 0) + 1
+
+    return {
+        "sweeps": [{"key": k, "values": v} for k, v in zip(keys, coerced)],
+        "primary_metric": req.primary_metric,
+        "train_pct": req.train_pct,
+        "top_k": req.top_k,
+        "min_test_trades": req.min_test_trades,
+        "total_combos": total,
+        "evaluated": len(scored),
+        "split_datetime": split_datetime,
+        "train_bars": int(len(train_df)),
+        "test_bars": int(len(test_df)),
+        "results": validated,
+        "tier_counts": tier_counts,
+        "max_combos": AUTO_ROBUST_MAX_COMBOS,
     }

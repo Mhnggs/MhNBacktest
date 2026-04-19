@@ -40,6 +40,11 @@ export async function runOptimize(payload) {
   return res.data
 }
 
+export async function runAutoRobust(payload) {
+  const res = await api.post('/backtest/auto_robust', payload)
+  return res.data
+}
+
 export async function listSessions() {
   const res = await api.get('/data/sessions')
   return res.data

@@ -68,6 +68,19 @@ class OptimizeRequest(BacktestRequest):
     )
 
 
+class SweepAxis(BaseModel):
+    key: str
+    values: list[float]
+
+
+class AutoRobustRequest(BacktestRequest):
+    sweeps: list[SweepAxis]
+    train_pct: float = Field(0.7, ge=0.1, le=0.9)
+    top_k: int = Field(10, ge=1, le=50)
+    primary_metric: str = "sharpe_ratio"
+    min_test_trades: int = Field(5, ge=0, le=1000)
+
+
 class UploadResponse(BaseModel):
     session_id: str
     rows_loaded: int

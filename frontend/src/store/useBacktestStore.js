@@ -58,6 +58,9 @@ export const useBacktestStore = create((set, get) => ({
   // Optimization
   optimizeResults: null,
 
+  // Auto Robust
+  autoRobustResults: null,
+
   setSession: ({ sessionId, summary, sample, source }) =>
     set({
       sessionId,
@@ -85,4 +88,7 @@ export const useBacktestStore = create((set, get) => ({
   setWalkForwardResults: (walkForwardResults) => set({ walkForwardResults, error: null }),
   setWalkForwardTrainPct: (walkForwardTrainPct) => set({ walkForwardTrainPct }),
   setOptimizeResults: (optimizeResults) => set({ optimizeResults, error: null }),
+  setAutoRobustResults: (autoRobustResults) => set({ autoRobustResults, error: null }),
+  applyParams: (overrides) =>
+    set((s) => ({ params: { ...s.params, ...overrides } })),
 }))

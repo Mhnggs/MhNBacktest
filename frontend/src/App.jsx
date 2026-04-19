@@ -8,10 +8,12 @@ import TradeLog from './components/TradeLog'
 import Breakdowns from './components/Breakdowns'
 import WalkForward from './components/WalkForward'
 import Optimize from './components/Optimize'
+import FindRobust from './components/FindRobust'
 import { useBacktestStore } from './store/useBacktestStore'
 
 const VIEWS = [
   { key: 'backtest', label: 'Backtest' },
+  { key: 'findrobust', label: 'Find Robust' },
   { key: 'walkforward', label: 'Walk Forward' },
   { key: 'optimize', label: 'Optimize' },
 ]
@@ -67,6 +69,10 @@ export default function App() {
         ) : activeView === 'walkforward' ? (
           <section className="lg:col-span-9">
             <WalkForward />
+          </section>
+        ) : activeView === 'findrobust' ? (
+          <section className="lg:col-span-9">
+            <FindRobust />
           </section>
         ) : (
           <section className="lg:col-span-9">
