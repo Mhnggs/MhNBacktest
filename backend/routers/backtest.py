@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 
@@ -20,7 +23,13 @@ router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 def _candles_with_indicators(df: pd.DataFrame, ema_period: int, ema_secondary: int,
                              adx_period: int) -> list[dict]:
-    """Attach indicators and serialize OHLCV rows for the candle chart."""
+    """Attach indicators and serialize OHLCV rows for the candle chart.
+
+    Indicator columns contain NaNs during their warmup period. Starlette's
+    JSONResponse rejects non-finite floats, so we must convert them to
+    nulls before returning. Using ``to_json`` then ``json.loads`` is the
+    simplest path that handles NaN/±Inf correctly across dtypes.
+    """
     from ..services.indicators import build_indicator_frame
 
     with_ind = build_indicator_frame(
@@ -29,10 +38,12 @@ def _candles_with_indicators(df: pd.DataFrame, ema_period: int, ema_secondary: i
         ema_secondary=ema_secondary,
         adx_period=adx_period,
     )
-    return (
+    with_ind = with_ind.replace([np.inf, -np.inf], np.nan)
+    serialized = (
         with_ind.assign(datetime=lambda d: d["datetime"].astype(str))
-        .to_dict("records")
+        .to_json(orient="records", date_format="iso")
     )
+    return json.loads(serialized)
 
 
 def _load_filtered_df(req: BacktestRequest) -> pd.DataFrame:
