@@ -7,33 +7,36 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+ALLOWED_PATTERN_KEYS = {
+    "engulfing", "hammer_star", "piercing_cloud", "marubozu", "doji",
+}
+
+
 class StrategyParamsSchema(BaseModel):
+    # Core strategy
     ema_period: int = Field(9, ge=2, le=200)
     ema_secondary: int = Field(20, ge=2, le=400)
-    volume_multiplier: float = Field(1.2, ge=0.0, le=10.0)
+    allowed_patterns: list[str] = Field(
+        default_factory=lambda: ["engulfing", "hammer_star", "marubozu"],
+    )
+    stop_loss_pips: float = Field(20.0, gt=0.0, le=1000.0)
     risk_reward: float = Field(2.0, ge=0.5, le=10.0)
-    partial_rr: float = Field(1.5, ge=0.5, le=10.0)
-    use_partial_tp: bool = True
-    stop_buffer_ticks: int = Field(3, ge=0, le=200)
-    tick_size: float = Field(0.0001, gt=0.0)
+    pip_size: float = Field(0.0001, gt=0.0)
+
+    # Sizing / risk
+    starting_capital: float = Field(10_000.0, gt=0.0)
+    risk_per_trade_pct: float = Field(1.0, gt=0.0, le=100.0)
     max_trades_per_day: int = Field(3, ge=1, le=50)
+
+    # Session
     session_start: str = "09:45"
     session_end: str = "11:30"
     session_2_start: str = "13:30"
     session_2_end: str = "15:00"
     use_session_2: bool = True
     timezone: str = "America/New_York"
-    vwap_max_distance_pct: float = Field(2.0, ge=0.0, le=100.0)
-    chop_filter_crossings: int = Field(3, ge=0, le=20)
-    require_volume: bool = True
-    require_pattern: bool = True
-    min_ema_slope: float = Field(0.0001, ge=0.0)
-    ema_touch_pct: float = Field(0.001, ge=0.0)
-    starting_capital: float = Field(10000.0, gt=0.0)
-    risk_per_trade_pct: float = Field(1.0, gt=0.0, le=100.0)
-    use_adx_filter: bool = True
-    adx_period: int = Field(14, ge=5, le=50)
-    adx_threshold: float = Field(25.0, ge=0.0, le=100.0)
+
+    # Day filter
     allowed_days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
 
 

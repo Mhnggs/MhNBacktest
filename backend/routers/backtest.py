@@ -26,22 +26,15 @@ from ..services.strategy import StrategyParams, run_backtest
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 
-def _candles_with_indicators(df: pd.DataFrame, ema_period: int, ema_secondary: int,
-                             adx_period: int) -> list[dict]:
-    """Attach indicators and serialize OHLCV rows for the candle chart.
-
-    Indicator columns contain NaNs during their warmup period. Starlette's
-    JSONResponse rejects non-finite floats, so we must convert them to
-    nulls before returning. Using ``to_json`` then ``json.loads`` is the
-    simplest path that handles NaN/±Inf correctly across dtypes.
-    """
+def _candles_with_indicators(df: pd.DataFrame, ema_period: int,
+                             ema_secondary: int) -> list[dict]:
+    """Attach EMAs + candle patterns and serialize rows for the chart."""
     from ..services.indicators import build_indicator_frame
 
     with_ind = build_indicator_frame(
         df,
         ema_period=ema_period,
         ema_secondary=ema_secondary,
-        adx_period=adx_period,
     )
     with_ind = with_ind.replace([np.inf, -np.inf], np.nan)
     serialized = (
@@ -111,7 +104,7 @@ def run(req: BacktestRequest):
     segment = _run_segment(df, params)
 
     candles = _candles_with_indicators(
-        df, params.ema_period, params.ema_secondary, params.adx_period,
+        df, params.ema_period, params.ema_secondary,
     )
 
     return {
@@ -132,7 +125,7 @@ def candles(req: BacktestRequest):
     params = StrategyParams(**req.params.model_dump())
     return {
         "candles": _candles_with_indicators(
-            df, params.ema_period, params.ema_secondary, params.adx_period,
+            df, params.ema_period, params.ema_secondary,
         ),
         "session_markers": _session_markers(params),
     }
@@ -184,14 +177,10 @@ def _consistency_score(train_stats: dict, test_stats: dict) -> dict:
 OPTIMIZE_ALLOWED_PARAMS = {
     "ema_period": {"type": int, "label": "EMA Fast", "min": 3, "max": 100},
     "ema_secondary": {"type": int, "label": "EMA Slow", "min": 3, "max": 200},
-    "volume_multiplier": {"type": float, "label": "Volume ×", "min": 0.5, "max": 5.0},
+    "stop_loss_pips": {"type": float, "label": "Stop Loss (pips)", "min": 1.0, "max": 500.0},
     "risk_reward": {"type": float, "label": "Risk/Reward", "min": 0.5, "max": 8.0},
-    "adx_threshold": {"type": float, "label": "ADX Threshold", "min": 10.0, "max": 60.0},
-    "adx_period": {"type": int, "label": "ADX Period", "min": 5, "max": 50},
-    "vwap_max_distance_pct": {"type": float, "label": "VWAP Distance %", "min": 0.1, "max": 10.0},
-    "chop_filter_crossings": {"type": int, "label": "Chop Crossings", "min": 0, "max": 20},
-    "stop_buffer_ticks": {"type": int, "label": "Stop Buffer Ticks", "min": 0, "max": 100},
     "max_trades_per_day": {"type": int, "label": "Max Trades/Day", "min": 1, "max": 50},
+    "risk_per_trade_pct": {"type": float, "label": "Risk/Trade %", "min": 0.1, "max": 10.0},
 }
 
 OPTIMIZE_METRICS = {
@@ -207,6 +196,20 @@ def _coerce(name: str, value: float):
     lo, hi = spec["min"], spec["max"]
     value = max(lo, min(hi, value))
     return spec["type"](round(value)) if spec["type"] is int else float(value)
+
+
+PATTERN_OPTIONS = [
+    {"key": "engulfing", "label": "Engulfing"},
+    {"key": "hammer_star", "label": "Hammer / Shooting Star"},
+    {"key": "piercing_cloud", "label": "Piercing Line / Dark Cloud Cover"},
+    {"key": "marubozu", "label": "Marubozu"},
+    {"key": "doji", "label": "Doji"},
+]
+
+
+@router.get("/patterns")
+def patterns():
+    return {"patterns": PATTERN_OPTIONS}
 
 
 @router.get("/optimize/options")

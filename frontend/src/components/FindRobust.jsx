@@ -125,8 +125,8 @@ export default function FindRobust() {
 
   const [options, setOptions] = useState([])
   const [axes, setAxes] = useState([
-    { key: 'volume_multiplier', start: 1.0, end: 2.5, step: 0.25 },
-    { key: 'risk_reward', start: 1.5, end: 4.0, step: 0.5 },
+    { key: 'stop_loss_pips', start: 10, end: 40, step: 5 },
+    { key: 'risk_reward', start: 1.0, end: 3.0, step: 0.5 },
   ])
   const [metric, setMetric] = useState('sharpe_ratio')
   const [trainPct, setTrainPct] = useState(0.7)

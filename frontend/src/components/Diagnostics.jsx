@@ -1,17 +1,10 @@
 import { useBacktestStore } from '../store/useBacktestStore'
 
 const FILTER_LABELS = {
-  rejected_vwap_side: 'Wrong side of VWAP',
-  rejected_ema_slope: 'EMA slope too flat',
-  rejected_ema_touch: 'No EMA pullback touch',
-  rejected_candle_dir: 'Candle wrong direction',
-  rejected_volume: 'Volume below multiplier',
-  rejected_vwap_distance: 'Too far from VWAP',
-  rejected_chop: 'Too many VWAP crossings',
-  rejected_pattern: 'No candle pattern',
-  rejected_adx: 'ADX trend filter',
+  rejected_day_of_week: 'Day of week not allowed',
   rejected_max_per_day: 'Daily trade cap',
   rejected_open_trade: 'Already in trade',
+  rejected_no_pattern: 'No pattern on crossover bar',
 }
 
 export default function Diagnostics() {
@@ -19,26 +12,40 @@ export default function Diagnostics() {
   if (!results) return null
   const d = results.diagnostics || {}
   const totalTrades = results.trades?.length || 0
+  const patternCounts = d.pattern_counts || {}
+  const patternEntries = Object.entries(patternCounts).sort((a, b) => b[1] - a[1])
 
   if (totalTrades > 0) {
     return (
       <div className="card text-xs">
         <h2 className="text-sm font-semibold text-gray-200 mb-2">Diagnostics</h2>
         <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-gray-300">
-          <div>Bars processed</div><div className="text-right font-mono">{d.total_bars}</div>
-          <div>In session</div><div className="text-right font-mono">{d.in_session_bars}</div>
-          <div>Long signals</div><div className="text-right font-mono text-good">{d.long_signals}</div>
-          <div>Short signals</div><div className="text-right font-mono text-bad">{d.short_signals}</div>
-          {d.adx_filter_active && (
-            <>
-              <div>ADX filtered</div><div className="text-right font-mono">{d.rejected_adx || 0}</div>
-              <div>Avg ADX at entry</div><div className="text-right font-mono">{(d.avg_adx_at_entry || 0).toFixed(1)}</div>
-            </>
-          )}
-          {!d.volume_filter_active && (
-            <div className="col-span-2 text-warn">Volume filter auto-disabled (no volume data)</div>
-          )}
+          <div>Bars processed</div><div className="text-right font-mono">{d.total_bars || 0}</div>
+          <div>In session</div><div className="text-right font-mono">{d.in_session_bars || 0}</div>
+          <div>Bullish crosses</div><div className="text-right font-mono text-good">{d.bullish_crosses || 0}</div>
+          <div>Bearish crosses</div><div className="text-right font-mono text-bad">{d.bearish_crosses || 0}</div>
+          <div>Long signals</div><div className="text-right font-mono text-good">{d.long_signals || 0}</div>
+          <div>Short signals</div><div className="text-right font-mono text-bad">{d.short_signals || 0}</div>
+          <div>Rejected (no pattern)</div><div className="text-right font-mono">{d.rejected_no_pattern || 0}</div>
+          <div>Rejected (day filter)</div><div className="text-right font-mono">{d.rejected_day_of_week || 0}</div>
+          <div>Rejected (daily cap)</div><div className="text-right font-mono">{d.rejected_max_per_day || 0}</div>
+          <div>Rejected (in trade)</div><div className="text-right font-mono">{d.rejected_open_trade || 0}</div>
         </div>
+        {patternEntries.length > 0 && (
+          <div className="mt-3 border-t border-border pt-2">
+            <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+              Patterns that fired
+            </div>
+            <div className="space-y-1">
+              {patternEntries.map(([name, count]) => (
+                <div key={name} className="flex justify-between text-xs">
+                  <span className="text-gray-300">{name}</span>
+                  <span className="font-mono text-gray-400">{count}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -51,11 +58,9 @@ export default function Diagnostics() {
   return (
     <div className="card">
       <h2 className="text-sm font-semibold text-warn mb-2">Zero trades — why?</h2>
-      <div className="text-xs text-gray-400 mb-3">
-        {d.total_bars || 0} bars processed · {d.in_session_bars || 0} in session · {d.candidate_bars || 0} candidates
-        {!d.volume_filter_active && (
-          <div className="text-warn mt-1">Volume filter auto-disabled (no volume data)</div>
-        )}
+      <div className="text-xs text-gray-400 mb-3 space-y-0.5">
+        <div>{d.total_bars || 0} bars processed · {d.in_session_bars || 0} in session</div>
+        <div>{d.bullish_crosses || 0} bullish crosses · {d.bearish_crosses || 0} bearish crosses</div>
       </div>
       <div className="space-y-1 text-xs">
         {rejections.map(([label, count]) => (
@@ -66,8 +71,8 @@ export default function Diagnostics() {
         ))}
       </div>
       <div className="mt-3 text-[11px] text-gray-500 leading-relaxed border-t border-border pt-2">
-        Common fixes: turn off "Require Candle Pattern", widen session times, lower
-        "Min EMA Slope", or check that your session timezone matches the data.
+        Common fixes: select more candlestick patterns, widen session times, allow more days,
+        or check that your session timezone matches the data.
       </div>
     </div>
   )

@@ -19,8 +19,8 @@ function fmtPct(v, digits = 2) {
 function exportCsv(trades) {
   if (!trades || !trades.length) return
   const cols = [
-    'id', 'direction', 'entry_time', 'entry_price', 'stop',
-    'target_1', 'target_2', 'exit_time', 'exit_price', 'pnl', 'pnl_pct', 'result',
+    'id', 'direction', 'pattern', 'entry_time', 'entry_price', 'stop',
+    'target', 'exit_time', 'exit_price', 'pnl', 'pnl_pct', 'result',
   ]
   const lines = [cols.join(',')]
   for (const t of trades) {
@@ -155,7 +155,8 @@ export default function TradeLog() {
             <tr>
               {[
                 ['id', '#'], ['entry_time', 'Entry Time'], ['direction', 'Dir'],
-                ['entry_price', 'Entry'], ['stop', 'Stop'], ['target_2', 'Target'],
+                ['pattern', 'Pattern'],
+                ['entry_price', 'Entry'], ['stop', 'Stop'], ['target', 'Target'],
                 ['exit_price', 'Exit'], ['pnl', 'P&L $'], ['pnl_pct', 'P&L %'], ['result', 'Result'],
               ].map(([k, label]) => (
                 <th key={k} className="text-left py-2 px-2 cursor-pointer hover:text-accent" onClick={() => toggleSort(k)}>
@@ -183,9 +184,10 @@ export default function TradeLog() {
                   <td className="px-2 py-1.5 uppercase">
                     <span className={t.direction === 'long' ? 'text-good' : 'text-bad'}>{t.direction}</span>
                   </td>
+                  <td className="px-2 py-1.5 text-gray-300 text-[11px]">{t.pattern || '—'}</td>
                   <td className="px-2 py-1.5 font-mono">{t.entry_price?.toFixed(5)}</td>
                   <td className="px-2 py-1.5 font-mono">{t.stop?.toFixed(5)}</td>
-                  <td className="px-2 py-1.5 font-mono">{t.target_2?.toFixed(5)}</td>
+                  <td className="px-2 py-1.5 font-mono">{t.target?.toFixed(5)}</td>
                   <td className="px-2 py-1.5 font-mono">{t.exit_price?.toFixed(5)}</td>
                   <td className={`px-2 py-1.5 font-mono ${t.pnl >= 0 ? 'text-good' : 'text-bad'}`}>{fmtMoney(t.pnl)}</td>
                   <td className={`px-2 py-1.5 font-mono ${t.pnl_pct >= 0 ? 'text-good' : 'text-bad'}`}>{t.pnl_pct?.toFixed(2)}%</td>
@@ -202,7 +204,7 @@ export default function TradeLog() {
               )
             })}
             {!view.length && (
-              <tr><td colSpan={11} className="px-2 py-6 text-center text-gray-500">No trades match the filters.</td></tr>
+              <tr><td colSpan={12} className="px-2 py-6 text-center text-gray-500">No trades match the filters.</td></tr>
             )}
           </tbody>
           {summary && (
@@ -214,7 +216,7 @@ export default function TradeLog() {
                 <td className="px-2 py-2 text-gray-400">
                   {summary.wins}W / {summary.losses}L
                 </td>
-                <td className="px-2 py-2 text-gray-400" colSpan={3}>
+                <td className="px-2 py-2 text-gray-400" colSpan={4}>
                   Win rate <span className="text-gray-100">{fmtPct(summary.win_rate, 1)}</span>
                 </td>
                 <td className="px-2 py-2 text-gray-400">

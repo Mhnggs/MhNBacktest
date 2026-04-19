@@ -1,10 +1,19 @@
-import { useBacktestStore } from '../store/useBacktestStore'
-import { runBacktest } from '../api/client'
+import { useEffect, useState } from 'react'
+import { useBacktestStore, defaultParams } from '../store/useBacktestStore'
+import { runBacktest, getPatterns } from '../api/client'
 
 const TIMEZONES = [
   'America/New_York', 'America/Chicago', 'America/Los_Angeles',
   'Europe/London', 'Europe/Berlin', 'Asia/Karachi', 'Asia/Dubai',
   'Asia/Tokyo', 'Asia/Singapore', 'Australia/Sydney', 'UTC',
+]
+
+const FALLBACK_PATTERNS = [
+  { key: 'engulfing', label: 'Engulfing' },
+  { key: 'hammer_star', label: 'Hammer / Shooting Star' },
+  { key: 'piercing_cloud', label: 'Piercing Line / Dark Cloud Cover' },
+  { key: 'marubozu', label: 'Marubozu' },
+  { key: 'doji', label: 'Doji' },
 ]
 
 function Field({ label, children }) {
@@ -89,6 +98,33 @@ function DayToggles({ value, onChange }) {
   )
 }
 
+function PatternToggles({ options, value, onChange }) {
+  const active = new Set(value || [])
+  const toggle = (key) => {
+    const next = new Set(active)
+    if (next.has(key)) next.delete(key); else next.add(key)
+    onChange(Array.from(next))
+  }
+  return (
+    <div className="grid grid-cols-1 gap-1">
+      {options.map((opt) => {
+        const on = active.has(opt.key)
+        return (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => toggle(opt.key)}
+            className={`btn ${on ? 'btn-primary' : 'btn-ghost'} justify-start text-left text-xs py-1.5`}
+          >
+            <span className="w-4 inline-block">{on ? '✓' : ''}</span>
+            <span>{opt.label}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function Section({ title, children }) {
   return (
     <div className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
@@ -101,12 +137,30 @@ function Section({ title, children }) {
 export default function ParameterPanel() {
   const {
     params, setParam, sessionId, startDate, endDate, setDateRange,
-    isRunning, setRunning, setResults, setError,
+    isRunning, setRunning, setResults, setError, resetParams,
   } = useBacktestStore()
+
+  const [patternOptions, setPatternOptions] = useState(FALLBACK_PATTERNS)
+
+  useEffect(() => {
+    let mounted = true
+    getPatterns()
+      .then((data) => {
+        if (mounted && Array.isArray(data?.patterns) && data.patterns.length) {
+          setPatternOptions(data.patterns)
+        }
+      })
+      .catch(() => { /* keep fallback */ })
+    return () => { mounted = false }
+  }, [])
 
   async function handleRun() {
     if (!sessionId) {
       setError('Load a dataset first (upload CSV or fetch from TwelveData)')
+      return
+    }
+    if (!params.allowed_patterns || params.allowed_patterns.length === 0) {
+      setError('Select at least one candlestick pattern to use as entry trigger.')
       return
     }
     setRunning(true)
@@ -128,29 +182,62 @@ export default function ParameterPanel() {
 
   return (
     <div className="card space-y-4">
-      <h2 className="text-sm font-semibold text-gray-200">Strategy Parameters</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-200">Strategy Parameters</h2>
+        <button
+          type="button"
+          className="btn btn-ghost text-[11px] px-2 py-1"
+          onClick={resetParams}
+          title="Reset to defaults"
+        >
+          Reset
+        </button>
+      </div>
 
-      <Section title="Strategy">
+      <Section title="EMA Crossover">
         <Field label="EMA Fast Period">
-          <NumberInput value={params.ema_period} onChange={(v) => setParam('ema_period', v)} min={3} max={50} />
+          <NumberInput value={params.ema_period} onChange={(v) => setParam('ema_period', v)} min={2} max={200} />
         </Field>
         <Field label="EMA Slow Period">
-          <NumberInput value={params.ema_secondary} onChange={(v) => setParam('ema_secondary', v)} min={5} max={200} />
+          <NumberInput value={params.ema_secondary} onChange={(v) => setParam('ema_secondary', v)} min={2} max={400} />
         </Field>
-        <Field label={`Volume Multiplier (${params.volume_multiplier})`}>
-          <Slider value={params.volume_multiplier} onChange={(v) => setParam('volume_multiplier', v)} min={1.0} max={3.0} step={0.1} />
+        <div className="text-[11px] text-gray-500 leading-relaxed">
+          Bullish cross (fast crosses above slow) → look for a long setup. Bearish cross → short setup.
+        </div>
+      </Section>
+
+      <Section title="Entry Patterns">
+        <PatternToggles
+          options={patternOptions}
+          value={params.allowed_patterns}
+          onChange={(v) => setParam('allowed_patterns', v)}
+        />
+        <div className="text-[11px] text-gray-500 leading-relaxed">
+          A trade only fires when one of the selected patterns prints on the crossover bar.
+        </div>
+      </Section>
+
+      <Section title="Risk">
+        <Field label="Stop Loss (pips)">
+          <NumberInput value={params.stop_loss_pips} onChange={(v) => setParam('stop_loss_pips', v)} step={1} min={1} max={1000} />
         </Field>
         <Field label={`Risk / Reward (${params.risk_reward})`}>
-          <Slider value={params.risk_reward} onChange={(v) => setParam('risk_reward', v)} min={1.0} max={5.0} step={0.5} />
+          <Slider value={params.risk_reward} onChange={(v) => setParam('risk_reward', v)} min={0.5} max={5.0} step={0.25} />
         </Field>
-        <Field label="Stop Buffer (ticks)">
-          <NumberInput value={params.stop_buffer_ticks} onChange={(v) => setParam('stop_buffer_ticks', v)} min={0} />
-        </Field>
-        <Field label="Tick Size">
-          <NumberInput value={params.tick_size} onChange={(v) => setParam('tick_size', v)} step={0.0001} />
+        <Field label="Pip Size">
+          <select
+            className="input"
+            value={params.pip_size}
+            onChange={(e) => setParam('pip_size', Number(e.target.value))}
+          >
+            <option value={0.0001}>0.0001 (EURUSD, GBPUSD, …)</option>
+            <option value={0.01}>0.01 (JPY pairs)</option>
+            <option value={0.1}>0.1 (XAUUSD / Gold)</option>
+            <option value={1}>1 (indices, BTC)</option>
+          </select>
         </Field>
         <Field label="Max Trades / Day">
-          <NumberInput value={params.max_trades_per_day} onChange={(v) => setParam('max_trades_per_day', v)} min={1} />
+          <NumberInput value={params.max_trades_per_day} onChange={(v) => setParam('max_trades_per_day', v)} min={1} max={50} />
         </Field>
       </Section>
 
@@ -181,35 +268,9 @@ export default function ParameterPanel() {
         </Field>
       </Section>
 
-      <Section title="Trend Filter">
-        <Toggle label="Enable ADX Filter" value={params.use_adx_filter} onChange={(v) => setParam('use_adx_filter', v)} />
-        <Field label="ADX Period">
-          <NumberInput value={params.adx_period} onChange={(v) => setParam('adx_period', v)} min={5} max={50} />
-        </Field>
-        <Field label={`ADX Threshold (${params.adx_threshold})`}>
-          <Slider value={params.adx_threshold} onChange={(v) => setParam('adx_threshold', v)} min={15} max={50} step={1} />
-        </Field>
-        <div className="text-[11px] text-gray-500 leading-relaxed">
-          ADX {'>'} 25 = trending market. Below 25 is choppy — signals are skipped.
-          Longs also require +DI {'>'} -DI; shorts require -DI {'>'} +DI.
-        </div>
-      </Section>
-
       <Section title="Day Filter">
         <DayToggles value={params.allowed_days} onChange={(v) => setParam('allowed_days', v)} />
         <div className="text-[11px] text-gray-500">Based on backtest timezone.</div>
-      </Section>
-
-      <Section title="Filters">
-        <Field label={`VWAP Max Distance % (${params.vwap_max_distance_pct})`}>
-          <Slider value={params.vwap_max_distance_pct} onChange={(v) => setParam('vwap_max_distance_pct', v)} min={0.1} max={10} step={0.1} />
-        </Field>
-        <Field label="Chop Filter (max VWAP crossings / 10 bars)">
-          <NumberInput value={params.chop_filter_crossings} onChange={(v) => setParam('chop_filter_crossings', v)} min={0} max={10} />
-        </Field>
-        <Toggle label="Require Volume Confirmation" value={params.require_volume} onChange={(v) => setParam('require_volume', v)} />
-        <Toggle label="Require Candle Pattern" value={params.require_pattern} onChange={(v) => setParam('require_pattern', v)} />
-        <Toggle label="Use Partial TP at 1.5R" value={params.use_partial_tp} onChange={(v) => setParam('use_partial_tp', v)} />
       </Section>
 
       <Section title="Account">

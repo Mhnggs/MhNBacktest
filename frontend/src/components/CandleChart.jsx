@@ -38,9 +38,6 @@ export default function CandleChart() {
       time: toUnix(c.datetime),
       open: c.open, high: c.high, low: c.low, close: c.close,
     })))
-    const vwap = dedupSorted(results.candles
-      .filter((c) => c.vwap != null && !isNaN(c.vwap))
-      .map((c) => ({ time: toUnix(c.datetime), value: c.vwap })))
     const emaFast = dedupSorted(results.candles
       .filter((c) => c.ema_fast != null && !isNaN(c.ema_fast))
       .map((c) => ({ time: toUnix(c.datetime), value: c.ema_fast })))
@@ -72,7 +69,7 @@ export default function CandleChart() {
       }
     }
     markers.sort((a, b) => a.time - b.time)
-    return { candles, vwap, emaFast, emaSlow, markers }
+    return { candles, emaFast, emaSlow, markers }
   }, [results])
 
   useEffect(() => {
@@ -90,11 +87,10 @@ export default function CandleChart() {
       borderUpColor: '#22c55e', borderDownColor: '#ef4444',
       wickUpColor: '#22c55e', wickDownColor: '#ef4444',
     })
-    const vwap = chart.addLineSeries({ color: '#22d3ee', lineWidth: 2, priceLineVisible: false })
     const emaFast = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, priceLineVisible: false })
     const emaSlow = chart.addLineSeries({ color: '#a855f7', lineWidth: 1, priceLineVisible: false })
     chartRef.current = chart
-    seriesRef.current = { candle, vwap, emaFast, emaSlow }
+    seriesRef.current = { candle, emaFast, emaSlow }
 
     const clickSub = chart.subscribeClick((p) => {
       if (!p?.time || !data?.markers) return
@@ -122,9 +118,8 @@ export default function CandleChart() {
 
   useEffect(() => {
     if (!data || !seriesRef.current.candle) return
-    const { candle, vwap, emaFast, emaSlow } = seriesRef.current
+    const { candle, emaFast, emaSlow } = seriesRef.current
     candle.setData(data.candles)
-    vwap.setData(showIndicators ? data.vwap : [])
     emaFast.setData(showIndicators ? data.emaFast : [])
     emaSlow.setData(showIndicators ? data.emaSlow : [])
     candle.setMarkers(data.markers)
@@ -141,7 +136,7 @@ export default function CandleChart() {
     const opts = { axisLabelVisible: true, lineWidth: 1, lineStyle: 2 }
     lines.push(candle.createPriceLine({ price: trade.entry_price, color: '#22d3ee', title: 'Entry', ...opts }))
     lines.push(candle.createPriceLine({ price: trade.stop, color: '#ef4444', title: 'Stop', ...opts }))
-    lines.push(candle.createPriceLine({ price: trade.target_2, color: '#22c55e', title: 'Target', ...opts }))
+    lines.push(candle.createPriceLine({ price: trade.target, color: '#22c55e', title: 'Target', ...opts }))
     const tEntry = toUnix(trade.entry_time)
     const tExit = trade.exit_time ? toUnix(trade.exit_time) : tEntry + 3600
     const pad = Math.max(1800, (tExit - tEntry))
@@ -188,7 +183,6 @@ export default function CandleChart() {
         </div>
       </div>
       <div className="flex gap-3 text-[10px] text-gray-400 mb-1">
-        <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: '#22d3ee' }} />VWAP</span>
         <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: '#f59e0b' }} />EMA Fast</span>
         <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: '#a855f7' }} />EMA Slow</span>
         <span>▲ long entry · ▼ short entry · ● win · ■ loss</span>

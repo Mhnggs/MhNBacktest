@@ -3,12 +3,12 @@ import { create } from 'zustand'
 export const defaultParams = {
   ema_period: 9,
   ema_secondary: 20,
-  volume_multiplier: 1.2,
+  allowed_patterns: ['engulfing', 'hammer_star', 'marubozu'],
+  stop_loss_pips: 20,
   risk_reward: 2.0,
-  partial_rr: 1.5,
-  use_partial_tp: true,
-  stop_buffer_ticks: 3,
-  tick_size: 0.0001,
+  pip_size: 0.0001,
+  starting_capital: 10000,
+  risk_per_trade_pct: 1.0,
   max_trades_per_day: 3,
   session_start: '09:45',
   session_end: '11:30',
@@ -16,17 +16,6 @@ export const defaultParams = {
   session_2_end: '15:00',
   use_session_2: true,
   timezone: 'America/New_York',
-  vwap_max_distance_pct: 2.0,
-  chop_filter_crossings: 3,
-  require_volume: true,
-  require_pattern: true,
-  min_ema_slope: 0.0001,
-  ema_touch_pct: 0.001,
-  starting_capital: 10000,
-  risk_per_trade_pct: 1.0,
-  use_adx_filter: true,
-  adx_period: 14,
-  adx_threshold: 25,
   allowed_days: [0, 1, 2, 3, 4],
 }
 
@@ -51,7 +40,7 @@ export const useBacktestStore = create((set, get) => ({
   error: null,
 
   // View / walk-forward
-  activeView: 'backtest', // 'backtest' | 'walkforward' | 'optimize'
+  activeView: 'backtest',
   walkForwardResults: null,
   walkForwardTrainPct: 0.7,
 

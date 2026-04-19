@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useBacktestStore } from '../store/useBacktestStore'
 import { getOptimizeOptions, runOptimize } from '../api/client'
 
-const DEFAULT_X = 'volume_multiplier'
+const DEFAULT_X = 'stop_loss_pips'
 const DEFAULT_Y = 'risk_reward'
 const DEFAULT_METRIC = 'sharpe_ratio'
 
@@ -90,11 +90,11 @@ export default function Optimize() {
   const [xParam, setXParam] = useState(DEFAULT_X)
   const [yParam, setYParam] = useState(DEFAULT_Y)
   const [metric, setMetric] = useState(DEFAULT_METRIC)
-  const [xStart, setXStart] = useState(1.0)
-  const [xEnd, setXEnd] = useState(2.5)
-  const [xStep, setXStep] = useState(0.25)
-  const [yStart, setYStart] = useState(1.5)
-  const [yEnd, setYEnd] = useState(4.0)
+  const [xStart, setXStart] = useState(10)
+  const [xEnd, setXEnd] = useState(40)
+  const [xStep, setXStep] = useState(5)
+  const [yStart, setYStart] = useState(1.0)
+  const [yEnd, setYEnd] = useState(3.0)
   const [yStep, setYStep] = useState(0.5)
 
   useEffect(() => {

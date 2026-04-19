@@ -1,68 +1,73 @@
-"""VWAP + EMA pullback strategy: signal generation and trade execution."""
+"""EMA crossover strategy with candlestick-pattern entry triggers."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import time as dtime
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 import pytz
 
 from .indicators import build_indicator_frame
 
 
+# Pattern group → (bullish column, bearish column).
+# The UI offers these group keys; the engine expands each to the directional
+# column matching the crossover direction.
+PATTERN_GROUPS: dict[str, tuple[str, str]] = {
+    "engulfing": ("bullish_engulfing", "bearish_engulfing"),
+    "hammer_star": ("hammer", "shooting_star"),
+    "piercing_cloud": ("piercing_line", "dark_cloud_cover"),
+    "marubozu": ("bullish_marubozu", "bearish_marubozu"),
+    "doji": ("doji", "doji"),
+}
+
+
 @dataclass
 class StrategyParams:
+    # Core strategy
     ema_period: int = 9
     ema_secondary: int = 20
-    volume_multiplier: float = 1.2
+    allowed_patterns: tuple = ("engulfing", "hammer_star", "marubozu")
+    stop_loss_pips: float = 20.0
     risk_reward: float = 2.0
-    partial_rr: float = 1.5
-    use_partial_tp: bool = True
-    stop_buffer_ticks: int = 3
-    tick_size: float = 0.0001
+    pip_size: float = 0.0001  # 0.0001 for majors, 0.01 for JPY, 0.1 for gold, etc.
+
+    # Risk / sizing
+    starting_capital: float = 10_000.0
+    risk_per_trade_pct: float = 1.0
     max_trades_per_day: int = 3
+
+    # Session window
     session_start: str = "09:45"
     session_end: str = "11:30"
     session_2_start: str = "13:30"
     session_2_end: str = "15:00"
     use_session_2: bool = True
     timezone: str = "America/New_York"
-    vwap_max_distance_pct: float = 2.0
-    chop_filter_crossings: int = 3
-    require_volume: bool = True
-    require_pattern: bool = True
-    min_ema_slope: float = 0.0001
-    ema_touch_pct: float = 0.001  # 0.1%
-    starting_capital: float = 10_000.0
-    risk_per_trade_pct: float = 1.0
-    use_adx_filter: bool = True
-    adx_period: int = 14
-    adx_threshold: float = 25.0
-    allowed_days: tuple = (0, 1, 2, 3, 4)  # 0=Mon … 4=Fri
+
+    # Day filter (0 = Mon … 4 = Fri)
+    allowed_days: tuple = (0, 1, 2, 3, 4)
 
 
 @dataclass
 class Trade:
     id: int
-    direction: str  # 'long' or 'short'
+    direction: str
     entry_time: pd.Timestamp
     entry_price: float
     stop: float
-    target_1: float
-    target_2: float
+    target: float
     risk_per_unit: float
     units: float
+    pattern: str = ""
     exit_time: Optional[pd.Timestamp] = None
     exit_price: Optional[float] = None
     pnl: float = 0.0
     pnl_pct: float = 0.0
-    result: str = "open"  # win | loss | breakeven | open | timeout
-    partial_filled: bool = False
+    result: str = "open"
     bars_held: int = 0
-    notes: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -77,43 +82,52 @@ def _parse_time(s: str) -> dtime:
 
 
 def _within_session(ts: pd.Timestamp, params: StrategyParams) -> bool:
-    """Check if a timestamp falls within an active trading session."""
     tz = pytz.timezone(params.timezone)
     local = ts.tz_convert(tz) if ts.tzinfo else tz.localize(ts.to_pydatetime())
     t = local.time()
-
-    s1 = _parse_time(params.session_start)
-    e1 = _parse_time(params.session_end)
-    if s1 <= t <= e1:
+    if _parse_time(params.session_start) <= t <= _parse_time(params.session_end):
         return True
-
     if params.use_session_2:
-        s2 = _parse_time(params.session_2_start)
-        e2 = _parse_time(params.session_2_end)
-        if s2 <= t <= e2:
+        if _parse_time(params.session_2_start) <= t <= _parse_time(params.session_2_end):
             return True
     return False
 
 
 def _session_end_today(ts: pd.Timestamp, params: StrategyParams) -> pd.Timestamp:
-    """Return the last session close for the day of `ts`."""
     tz = pytz.timezone(params.timezone)
     local = ts.tz_convert(tz) if ts.tzinfo else tz.localize(ts.to_pydatetime())
     end_str = params.session_2_end if params.use_session_2 else params.session_end
     eh, em = end_str.split(":")
     end_local = local.replace(hour=int(eh), minute=int(em), second=0, microsecond=0)
-    return pd.Timestamp(end_local).tz_convert("UTC") if ts.tzinfo else pd.Timestamp(end_local.replace(tzinfo=None))
+    return (
+        pd.Timestamp(end_local).tz_convert("UTC")
+        if ts.tzinfo else pd.Timestamp(end_local.replace(tzinfo=None))
+    )
+
+
+def _resolve_pattern_columns(allowed_keys: tuple) -> tuple[list[str], list[str]]:
+    bull, bear = [], []
+    for key in allowed_keys:
+        if key in PATTERN_GROUPS:
+            b, s = PATTERN_GROUPS[key]
+            bull.append(b)
+            bear.append(s)
+    return bull, bear
+
+
+def _match_pattern(bar: dict, columns: list[str]) -> Optional[str]:
+    for col in columns:
+        if bar.get(col):
+            return col
+    return None
 
 
 def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
-    """Run the strategy bar-by-bar and return trades + equity curve."""
     if df.empty:
-        return {"trades": [], "equity_curve": [], "signals": []}
+        return {"trades": [], "equity_curve": [], "diagnostics": {}}
 
     work = df.copy()
     if not isinstance(work["datetime"].dtype, pd.DatetimeTZDtype):
-        # Treat naive timestamps as the dataset's source tz (UTC by default).
-        # MetaTrader exports often use the broker's local time — see README for that case.
         source_tz = df.attrs.get("source_tz", "UTC")
         tz = pytz.timezone(source_tz)
         work["datetime"] = (
@@ -125,30 +139,20 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     else:
         work["datetime"] = work["datetime"].dt.tz_convert("UTC")
 
-    # Auto-disable volume filter if the dataset has no real volume info
-    # (common for forex / CFDs returned by TwelveData).
-    effective_require_volume = params.require_volume
-    if effective_require_volume and float(df["volume"].sum()) <= 0:
-        effective_require_volume = False
-
     work = build_indicator_frame(
         work,
         ema_period=params.ema_period,
         ema_secondary=params.ema_secondary,
-        adx_period=params.adx_period,
     )
 
     tz = pytz.timezone(params.timezone)
     local_ts = work["datetime"].dt.tz_convert(tz)
-    work["_local"] = local_ts
     work["_session_date"] = local_ts.dt.date
-    work["_local_time"] = local_ts.dt.time
     work["_local_dow"] = local_ts.dt.dayofweek
-    work["_in_session"] = work.apply(
-        lambda r: _within_session(r["datetime"], params), axis=1
-    )
+    work["_in_session"] = work["datetime"].apply(lambda ts: _within_session(ts, params))
 
-    allowed_days = set(int(d) for d in params.allowed_days)
+    allowed_days = {int(d) for d in params.allowed_days}
+    bull_cols, bear_cols = _resolve_pattern_columns(tuple(params.allowed_patterns))
 
     trades: list[Trade] = []
     equity = params.starting_capital
@@ -156,21 +160,22 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     open_trade: Optional[Trade] = None
     daily_count: dict = {}
     next_id = 1
-    tick = params.tick_size
+    stop_distance = float(params.stop_loss_pips) * float(params.pip_size)
 
     diag = {
-        "total_bars": 0, "in_session_bars": 0, "candidate_bars": 0,
-        "rejected_vwap_side": 0, "rejected_ema_slope": 0,
-        "rejected_ema_touch": 0, "rejected_candle_dir": 0,
-        "rejected_volume": 0, "rejected_vwap_distance": 0,
-        "rejected_chop": 0, "rejected_pattern": 0,
-        "rejected_adx": 0, "rejected_max_per_day": 0,
-        "rejected_open_trade": 0,
-        "long_signals": 0, "short_signals": 0,
-        "volume_filter_active": effective_require_volume,
-        "_adx_at_entry_sum": 0.0, "_adx_at_entry_count": 0,
+        "total_bars": 0,
+        "in_session_bars": 0,
         "rejected_day_of_week": 0,
+        "rejected_max_per_day": 0,
+        "rejected_open_trade": 0,
+        "bullish_crosses": 0,
+        "bearish_crosses": 0,
+        "rejected_no_pattern": 0,
+        "long_signals": 0,
+        "short_signals": 0,
+        "pattern_counts": {},
         "allowed_days": list(params.allowed_days),
+        "allowed_patterns": list(params.allowed_patterns),
     }
 
     rows = work.to_dict("records")
@@ -189,75 +194,37 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             t = open_trade
 
             if t.direction == "long":
-                hit_stop = low <= t.stop
-                hit_t1 = high >= t.target_1
-                hit_t2 = high >= t.target_2
-
-                if hit_stop and not (hit_t1 and t.partial_filled):
-                    pnl = (t.stop - t.entry_price) * t.units
+                if low <= t.stop:
                     t.exit_price = t.stop
                     t.exit_time = ts
-                    t.pnl = pnl
-                    t.result = "loss" if pnl < 0 else ("breakeven" if pnl == 0 else "win")
-                elif params.use_partial_tp and hit_t1 and not t.partial_filled:
-                    partial_pnl = (t.target_1 - t.entry_price) * (t.units * 0.5)
-                    t.partial_filled = True
-                    t.units *= 0.5
-                    t.stop = t.entry_price  # move to breakeven
-                    t.pnl += partial_pnl
-                    if hit_t2:
-                        final_pnl = (t.target_2 - t.entry_price) * t.units
-                        t.exit_price = t.target_2
-                        t.exit_time = ts
-                        t.pnl += final_pnl
-                        t.result = "win"
-                elif hit_t2:
-                    final_pnl = (t.target_2 - t.entry_price) * t.units
-                    t.exit_price = t.target_2
+                    t.pnl = (t.stop - t.entry_price) * t.units
+                    t.result = "loss" if t.pnl < 0 else "breakeven"
+                elif high >= t.target:
+                    t.exit_price = t.target
                     t.exit_time = ts
-                    t.pnl += final_pnl
+                    t.pnl = (t.target - t.entry_price) * t.units
                     t.result = "win"
             else:  # short
-                hit_stop = high >= t.stop
-                hit_t1 = low <= t.target_1
-                hit_t2 = low <= t.target_2
-
-                if hit_stop and not (hit_t1 and t.partial_filled):
-                    pnl = (t.entry_price - t.stop) * t.units
+                if high >= t.stop:
                     t.exit_price = t.stop
                     t.exit_time = ts
-                    t.pnl = pnl
-                    t.result = "loss" if pnl < 0 else ("breakeven" if pnl == 0 else "win")
-                elif params.use_partial_tp and hit_t1 and not t.partial_filled:
-                    partial_pnl = (t.entry_price - t.target_1) * (t.units * 0.5)
-                    t.partial_filled = True
-                    t.units *= 0.5
-                    t.stop = t.entry_price
-                    t.pnl += partial_pnl
-                    if hit_t2:
-                        final_pnl = (t.entry_price - t.target_2) * t.units
-                        t.exit_price = t.target_2
-                        t.exit_time = ts
-                        t.pnl += final_pnl
-                        t.result = "win"
-                elif hit_t2:
-                    final_pnl = (t.entry_price - t.target_2) * t.units
-                    t.exit_price = t.target_2
+                    t.pnl = (t.entry_price - t.stop) * t.units
+                    t.result = "loss" if t.pnl < 0 else "breakeven"
+                elif low <= t.target:
+                    t.exit_price = t.target
                     t.exit_time = ts
-                    t.pnl += final_pnl
+                    t.pnl = (t.entry_price - t.target) * t.units
                     t.result = "win"
 
-            # End-of-session close
             if t.exit_time is None:
                 end_today = _session_end_today(ts, params)
                 if ts >= end_today:
                     if t.direction == "long":
-                        final_pnl = (close - t.entry_price) * t.units
+                        t.pnl = (close - t.entry_price) * t.units
                     else:
-                        final_pnl = (t.entry_price - close) * t.units
+                        t.pnl = (t.entry_price - close) * t.units
                     t.exit_price = close
                     t.exit_time = ts
-                    t.pnl += final_pnl
                     t.result = "timeout"
 
             if t.exit_time is not None:
@@ -282,118 +249,62 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         if daily_count.get(session_date, 0) >= params.max_trades_per_day:
             diag["rejected_max_per_day"] += 1
             continue
-        if pd.isna(bar.get("ema_fast")) or pd.isna(bar.get("vwap")):
+
+        ef_now, es_now = bar.get("ema_fast"), bar.get("ema_slow")
+        ef_prev, es_prev = prev.get("ema_fast"), prev.get("ema_slow")
+        if any(pd.isna(v) for v in (ef_now, es_now, ef_prev, es_prev)):
             continue
-        diag["candidate_bars"] += 1
 
-        slope = bar.get("ema_fast_slope")
-        slope_ok_long = slope is not None and not pd.isna(slope) and slope > params.min_ema_slope
-        slope_ok_short = slope is not None and not pd.isna(slope) and slope < -params.min_ema_slope
+        bull_cross = ef_prev <= es_prev and ef_now > es_now
+        bear_cross = ef_prev >= es_prev and ef_now < es_now
+        if not (bull_cross or bear_cross):
+            continue
 
-        adx_val = bar.get("adx")
-        plus_di = bar.get("plus_di")
-        minus_di = bar.get("minus_di")
-        adx_ready = adx_val is not None and not pd.isna(adx_val)
-        adx_long_ok = (
-            (not params.use_adx_filter)
-            or (adx_ready and adx_val > params.adx_threshold and plus_di > minus_di)
-        )
-        adx_short_ok = (
-            (not params.use_adx_filter)
-            or (adx_ready and adx_val > params.adx_threshold and minus_di > plus_di)
-        )
-
-        long_checks = {
-            "vwap_side": bar["close"] > bar["vwap"],
-            "ema_slope": slope_ok_long,
-            "ema_touch": prev["low"] <= bar["ema_fast"] * (1 + params.ema_touch_pct),
-            "candle_dir": bar["close"] > bar["open"],
-            "volume": (not effective_require_volume) or bar["vol_ratio"] >= params.volume_multiplier,
-            "vwap_distance": (bar["close"] - bar["vwap"]) / bar["vwap"] * 100 <= params.vwap_max_distance_pct,
-            "chop": bar["vwap_crossings"] <= params.chop_filter_crossings,
-            "pattern": (not params.require_pattern) or bool(bar["bullish_pattern"]),
-            "adx": adx_long_ok,
-        }
-        short_checks = {
-            "vwap_side": bar["close"] < bar["vwap"],
-            "ema_slope": slope_ok_short,
-            "ema_touch": prev["high"] >= bar["ema_fast"] * (1 - params.ema_touch_pct),
-            "candle_dir": bar["close"] < bar["open"],
-            "volume": (not effective_require_volume) or bar["vol_ratio"] >= params.volume_multiplier,
-            "vwap_distance": (bar["vwap"] - bar["close"]) / bar["vwap"] * 100 <= params.vwap_max_distance_pct,
-            "chop": bar["vwap_crossings"] <= params.chop_filter_crossings,
-            "pattern": (not params.require_pattern) or bool(bar["bearish_pattern"]),
-            "adx": adx_short_ok,
-        }
-
-        long_cond = all(long_checks.values())
-        short_cond = all(short_checks.values())
-
-        # Track which filter most often blocks signals (only count when not in trade)
-        if not long_cond and not short_cond:
-            for name, ok in long_checks.items():
-                if not ok:
-                    diag[f"rejected_{name if name != 'vwap_side' else 'vwap_side'}"] = (
-                        diag.get(f"rejected_{name}", 0)
-                    )
-            # Use whichever side had the most filters passing as the "intended" direction
-            long_pass = sum(long_checks.values())
-            short_pass = sum(short_checks.values())
-            checks = long_checks if long_pass >= short_pass else short_checks
-            for name, ok in checks.items():
-                if not ok:
-                    key = f"rejected_{name}"
-                    diag[key] = diag.get(key, 0) + 1
-                    break  # only count the first failing filter per bar
-
-        if long_cond:
-            diag["long_signals"] += 1
-            if adx_ready:
-                diag["_adx_at_entry_sum"] += float(adx_val)
-                diag["_adx_at_entry_count"] += 1
-            entry = bar["high"] + tick
-            stop = bar["low"] - params.stop_buffer_ticks * tick
-            risk_per_unit = entry - stop
-            if risk_per_unit <= 0:
+        if bull_cross:
+            diag["bullish_crosses"] += 1
+            pattern = _match_pattern(bar, bull_cols)
+            if pattern is None:
+                diag["rejected_no_pattern"] += 1
+                continue
+            entry = float(bar["close"])
+            stop = entry - stop_distance
+            target = entry + stop_distance * params.risk_reward
+            if stop_distance <= 0:
                 continue
             risk_dollars = equity * (params.risk_per_trade_pct / 100.0)
-            units = risk_dollars / risk_per_unit
-            target_1 = entry + risk_per_unit * params.partial_rr
-            target_2 = entry + risk_per_unit * params.risk_reward
+            units = risk_dollars / stop_distance
+            diag["long_signals"] += 1
+            diag["pattern_counts"][pattern] = diag["pattern_counts"].get(pattern, 0) + 1
             open_trade = Trade(
                 id=next_id, direction="long", entry_time=ts, entry_price=entry,
-                stop=stop, target_1=target_1, target_2=target_2,
-                risk_per_unit=risk_per_unit, units=units,
+                stop=stop, target=target, risk_per_unit=stop_distance,
+                units=units, pattern=pattern,
             )
             next_id += 1
             daily_count[session_date] = daily_count.get(session_date, 0) + 1
 
-        elif short_cond:
-            diag["short_signals"] += 1
-            if adx_ready:
-                diag["_adx_at_entry_sum"] += float(adx_val)
-                diag["_adx_at_entry_count"] += 1
-            entry = bar["low"] - tick
-            stop = bar["high"] + params.stop_buffer_ticks * tick
-            risk_per_unit = stop - entry
-            if risk_per_unit <= 0:
+        elif bear_cross:
+            diag["bearish_crosses"] += 1
+            pattern = _match_pattern(bar, bear_cols)
+            if pattern is None:
+                diag["rejected_no_pattern"] += 1
+                continue
+            entry = float(bar["close"])
+            stop = entry + stop_distance
+            target = entry - stop_distance * params.risk_reward
+            if stop_distance <= 0:
                 continue
             risk_dollars = equity * (params.risk_per_trade_pct / 100.0)
-            units = risk_dollars / risk_per_unit
-            target_1 = entry - risk_per_unit * params.partial_rr
-            target_2 = entry - risk_per_unit * params.risk_reward
+            units = risk_dollars / stop_distance
+            diag["short_signals"] += 1
+            diag["pattern_counts"][pattern] = diag["pattern_counts"].get(pattern, 0) + 1
             open_trade = Trade(
                 id=next_id, direction="short", entry_time=ts, entry_price=entry,
-                stop=stop, target_1=target_1, target_2=target_2,
-                risk_per_unit=risk_per_unit, units=units,
+                stop=stop, target=target, risk_per_unit=stop_distance,
+                units=units, pattern=pattern,
             )
             next_id += 1
             daily_count[session_date] = daily_count.get(session_date, 0) + 1
-
-    adx_count = diag.pop("_adx_at_entry_count", 0)
-    adx_sum = diag.pop("_adx_at_entry_sum", 0.0)
-    diag["avg_adx_at_entry"] = (adx_sum / adx_count) if adx_count else 0.0
-    diag["adx_filter_active"] = bool(params.use_adx_filter)
 
     return {
         "trades": [t.to_dict() for t in trades],
