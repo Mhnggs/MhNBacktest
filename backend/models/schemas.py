@@ -31,6 +31,9 @@ class StrategyParamsSchema(BaseModel):
     ema_touch_pct: float = Field(0.001, ge=0.0)
     starting_capital: float = Field(10000.0, gt=0.0)
     risk_per_trade_pct: float = Field(1.0, gt=0.0, le=100.0)
+    use_adx_filter: bool = True
+    adx_period: int = Field(14, ge=5, le=50)
+    adx_threshold: float = Field(25.0, ge=0.0, le=100.0)
 
 
 class TwelveDataRequest(BaseModel):

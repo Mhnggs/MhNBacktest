@@ -9,6 +9,7 @@ const FILTER_LABELS = {
   rejected_vwap_distance: 'Too far from VWAP',
   rejected_chop: 'Too many VWAP crossings',
   rejected_pattern: 'No candle pattern',
+  rejected_adx: 'ADX trend filter',
   rejected_max_per_day: 'Daily trade cap',
   rejected_open_trade: 'Already in trade',
 }
@@ -28,6 +29,12 @@ export default function Diagnostics() {
           <div>In session</div><div className="text-right font-mono">{d.in_session_bars}</div>
           <div>Long signals</div><div className="text-right font-mono text-good">{d.long_signals}</div>
           <div>Short signals</div><div className="text-right font-mono text-bad">{d.short_signals}</div>
+          {d.adx_filter_active && (
+            <>
+              <div>ADX filtered</div><div className="text-right font-mono">{d.rejected_adx || 0}</div>
+              <div>Avg ADX at entry</div><div className="text-right font-mono">{(d.avg_adx_at_entry || 0).toFixed(1)}</div>
+            </>
+          )}
           {!d.volume_filter_active && (
             <div className="col-span-2 text-warn">Volume filter auto-disabled (no volume data)</div>
           )}

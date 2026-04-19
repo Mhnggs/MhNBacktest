@@ -153,6 +153,20 @@ export default function ParameterPanel() {
         </Field>
       </Section>
 
+      <Section title="Trend Filter">
+        <Toggle label="Enable ADX Filter" value={params.use_adx_filter} onChange={(v) => setParam('use_adx_filter', v)} />
+        <Field label="ADX Period">
+          <NumberInput value={params.adx_period} onChange={(v) => setParam('adx_period', v)} min={5} max={50} />
+        </Field>
+        <Field label={`ADX Threshold (${params.adx_threshold})`}>
+          <Slider value={params.adx_threshold} onChange={(v) => setParam('adx_threshold', v)} min={15} max={50} step={1} />
+        </Field>
+        <div className="text-[11px] text-gray-500 leading-relaxed">
+          ADX {'>'} 25 = trending market. Below 25 is choppy — signals are skipped.
+          Longs also require +DI {'>'} -DI; shorts require -DI {'>'} +DI.
+        </div>
+      </Section>
+
       <Section title="Filters">
         <Field label={`VWAP Max Distance % (${params.vwap_max_distance_pct})`}>
           <Slider value={params.vwap_max_distance_pct} onChange={(v) => setParam('vwap_max_distance_pct', v)} min={0.1} max={10} step={0.1} />

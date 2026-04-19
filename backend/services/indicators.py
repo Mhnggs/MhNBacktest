@@ -131,6 +131,40 @@ def add_vwap_crossings(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     return out
 
 
+def add_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    """Add ADX, +DI, and -DI columns using Wilder's smoothing.
+
+    Standard Wilder smoothing is an EMA with alpha = 1/period (RMA).
+    """
+    out = df.copy()
+    high = out["high"]
+    low = out["low"]
+    close = out["close"]
+    prev_close = close.shift(1)
+
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = ((up_move > down_move) & (up_move > 0)).astype(float) * up_move.clip(lower=0)
+    minus_dm = ((down_move > up_move) & (down_move > 0)).astype(float) * down_move.clip(lower=0)
+
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # Wilder RMA: alpha = 1/period (use ewm with alpha to match TradingView)
+    atr = tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+    out["plus_di"] = plus_di
+    out["minus_di"] = minus_di
+    out["adx"] = adx
+    return out
+
+
 def build_indicator_frame(
     df: pd.DataFrame,
     ema_period: int = 9,
@@ -138,6 +172,7 @@ def build_indicator_frame(
     ema_slope_lookback: int = 3,
     volume_lookback: int = 20,
     chop_window: int = 10,
+    adx_period: int = 14,
 ) -> pd.DataFrame:
     """One-shot pipeline to attach every indicator the strategy needs."""
     out = add_session_vwap(df)
@@ -147,4 +182,5 @@ def build_indicator_frame(
     out = add_volume_stats(out, volume_lookback)
     out = add_candle_patterns(out)
     out = add_vwap_crossings(out, chop_window)
+    out = add_adx(out, adx_period)
     return out

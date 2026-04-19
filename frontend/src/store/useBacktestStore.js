@@ -24,6 +24,9 @@ export const defaultParams = {
   ema_touch_pct: 0.001,
   starting_capital: 10000,
   risk_per_trade_pct: 1.0,
+  use_adx_filter: true,
+  adx_period: 14,
+  adx_threshold: 25,
 }
 
 export const useBacktestStore = create((set, get) => ({

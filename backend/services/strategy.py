@@ -38,6 +38,9 @@ class StrategyParams:
     ema_touch_pct: float = 0.001  # 0.1%
     starting_capital: float = 10_000.0
     risk_per_trade_pct: float = 1.0
+    use_adx_filter: bool = True
+    adx_period: int = 14
+    adx_threshold: float = 25.0
 
 
 @dataclass
@@ -131,6 +134,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         work,
         ema_period=params.ema_period,
         ema_secondary=params.ema_secondary,
+        adx_period=params.adx_period,
     )
 
     tz = pytz.timezone(params.timezone)
@@ -156,9 +160,11 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         "rejected_ema_touch": 0, "rejected_candle_dir": 0,
         "rejected_volume": 0, "rejected_vwap_distance": 0,
         "rejected_chop": 0, "rejected_pattern": 0,
-        "rejected_max_per_day": 0, "rejected_open_trade": 0,
+        "rejected_adx": 0, "rejected_max_per_day": 0,
+        "rejected_open_trade": 0,
         "long_signals": 0, "short_signals": 0,
         "volume_filter_active": effective_require_volume,
+        "_adx_at_entry_sum": 0.0, "_adx_at_entry_count": 0,
     }
 
     rows = work.to_dict("records")
@@ -275,6 +281,19 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         slope_ok_long = slope is not None and not pd.isna(slope) and slope > params.min_ema_slope
         slope_ok_short = slope is not None and not pd.isna(slope) and slope < -params.min_ema_slope
 
+        adx_val = bar.get("adx")
+        plus_di = bar.get("plus_di")
+        minus_di = bar.get("minus_di")
+        adx_ready = adx_val is not None and not pd.isna(adx_val)
+        adx_long_ok = (
+            (not params.use_adx_filter)
+            or (adx_ready and adx_val > params.adx_threshold and plus_di > minus_di)
+        )
+        adx_short_ok = (
+            (not params.use_adx_filter)
+            or (adx_ready and adx_val > params.adx_threshold and minus_di > plus_di)
+        )
+
         long_checks = {
             "vwap_side": bar["close"] > bar["vwap"],
             "ema_slope": slope_ok_long,
@@ -284,6 +303,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             "vwap_distance": (bar["close"] - bar["vwap"]) / bar["vwap"] * 100 <= params.vwap_max_distance_pct,
             "chop": bar["vwap_crossings"] <= params.chop_filter_crossings,
             "pattern": (not params.require_pattern) or bool(bar["bullish_pattern"]),
+            "adx": adx_long_ok,
         }
         short_checks = {
             "vwap_side": bar["close"] < bar["vwap"],
@@ -294,6 +314,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             "vwap_distance": (bar["vwap"] - bar["close"]) / bar["vwap"] * 100 <= params.vwap_max_distance_pct,
             "chop": bar["vwap_crossings"] <= params.chop_filter_crossings,
             "pattern": (not params.require_pattern) or bool(bar["bearish_pattern"]),
+            "adx": adx_short_ok,
         }
 
         long_cond = all(long_checks.values())
@@ -318,6 +339,9 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
         if long_cond:
             diag["long_signals"] += 1
+            if adx_ready:
+                diag["_adx_at_entry_sum"] += float(adx_val)
+                diag["_adx_at_entry_count"] += 1
             entry = bar["high"] + tick
             stop = bar["low"] - params.stop_buffer_ticks * tick
             risk_per_unit = entry - stop
@@ -337,6 +361,9 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
         elif short_cond:
             diag["short_signals"] += 1
+            if adx_ready:
+                diag["_adx_at_entry_sum"] += float(adx_val)
+                diag["_adx_at_entry_count"] += 1
             entry = bar["low"] - tick
             stop = bar["high"] + params.stop_buffer_ticks * tick
             risk_per_unit = stop - entry
@@ -353,6 +380,11 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             )
             next_id += 1
             daily_count[session_date] = daily_count.get(session_date, 0) + 1
+
+    adx_count = diag.pop("_adx_at_entry_count", 0)
+    adx_sum = diag.pop("_adx_at_entry_sum", 0.0)
+    diag["avg_adx_at_entry"] = (adx_sum / adx_count) if adx_count else 0.0
+    diag["adx_filter_active"] = bool(params.use_adx_filter)
 
     return {
         "trades": [t.to_dict() for t in trades],
