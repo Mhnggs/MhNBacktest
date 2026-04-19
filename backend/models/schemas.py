@@ -34,6 +34,7 @@ class StrategyParamsSchema(BaseModel):
     use_adx_filter: bool = True
     adx_period: int = Field(14, ge=5, le=50)
     adx_threshold: float = Field(25.0, ge=0.0, le=100.0)
+    allowed_days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
 
 
 class TwelveDataRequest(BaseModel):

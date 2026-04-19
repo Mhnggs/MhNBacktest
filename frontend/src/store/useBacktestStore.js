@@ -27,6 +27,7 @@ export const defaultParams = {
   use_adx_filter: true,
   adx_period: 14,
   adx_threshold: 25,
+  allowed_days: [0, 1, 2, 3, 4],
 }
 
 export const useBacktestStore = create((set, get) => ({

@@ -141,7 +141,9 @@ def dow_breakdown(trades: list[dict]) -> list[dict]:
         pnl=("pnl", "sum"),
         trades=("pnl", "count"),
         wins=("pnl", lambda s: int((s > 0).sum())),
+        avg_pnl=("pnl", "mean"),
     ).reset_index()
+    grouped["win_rate"] = (grouped["wins"] / grouped["trades"] * 100).round(1)
     order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     grouped["_o"] = grouped["dow"].map({d: i for i, d in enumerate(order)})
     grouped = grouped.sort_values("_o").drop(columns=["_o"])

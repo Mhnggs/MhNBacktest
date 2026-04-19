@@ -41,6 +41,7 @@ class StrategyParams:
     use_adx_filter: bool = True
     adx_period: int = 14
     adx_threshold: float = 25.0
+    allowed_days: tuple = (0, 1, 2, 3, 4)  # 0=Mon … 4=Fri
 
 
 @dataclass
@@ -142,9 +143,12 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     work["_local"] = local_ts
     work["_session_date"] = local_ts.dt.date
     work["_local_time"] = local_ts.dt.time
+    work["_local_dow"] = local_ts.dt.dayofweek
     work["_in_session"] = work.apply(
         lambda r: _within_session(r["datetime"], params), axis=1
     )
+
+    allowed_days = set(int(d) for d in params.allowed_days)
 
     trades: list[Trade] = []
     equity = params.starting_capital
@@ -165,6 +169,8 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         "long_signals": 0, "short_signals": 0,
         "volume_filter_active": effective_require_volume,
         "_adx_at_entry_sum": 0.0, "_adx_at_entry_count": 0,
+        "rejected_day_of_week": 0,
+        "allowed_days": list(params.allowed_days),
     }
 
     rows = work.to_dict("records")
@@ -270,6 +276,9 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         if not bar["_in_session"]:
             continue
         diag["in_session_bars"] += 1
+        if int(bar["_local_dow"]) not in allowed_days:
+            diag["rejected_day_of_week"] += 1
+            continue
         if daily_count.get(session_date, 0) >= params.max_trades_per_day:
             diag["rejected_max_per_day"] += 1
             continue

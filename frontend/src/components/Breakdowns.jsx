@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import {
-  BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+  BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  CartesianGrid, LabelList,
 } from 'recharts'
 import { useBacktestStore } from '../store/useBacktestStore'
 
@@ -9,6 +10,25 @@ const TABS = [
   { key: 'dow', label: 'Day of Week' },
   { key: 'hourly', label: 'Hour' },
 ]
+
+function fmtMoney(v) {
+  if (v == null || isNaN(v)) return ''
+  const sign = v < 0 ? '-' : ''
+  return `${sign}$${Math.abs(v).toFixed(0)}`
+}
+
+function DowTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0].payload
+  return (
+    <div className="bg-bg border border-border text-xs p-2">
+      <div className="font-semibold">{d.dow}</div>
+      <div>P&L: <span className={d.pnl >= 0 ? 'text-good' : 'text-bad'}>{fmtMoney(d.pnl)}</span></div>
+      <div>Win rate: {d.win_rate?.toFixed(1)}%</div>
+      <div>Trades: {d.trades} ({d.wins}W / {d.trades - d.wins}L)</div>
+    </div>
+  )
+}
 
 export default function Breakdowns() {
   const results = useBacktestStore((s) => s.results)
@@ -38,16 +58,37 @@ export default function Breakdowns() {
           ))}
         </div>
       </div>
-      <ResponsiveContainer width="100%" height={180}>
-        <BarChart data={rows}>
+      <ResponsiveContainer width="100%" height={tab === 'dow' ? 220 : 180}>
+        <BarChart data={rows} margin={{ top: 20, right: 10, left: 0, bottom: 20 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
           <XAxis dataKey={x} stroke="#6b7280" fontSize={10} />
           <YAxis stroke="#6b7280" fontSize={10} />
-          <Tooltip contentStyle={{ background: '#0b0f17', border: '1px solid #1f2937', fontSize: 12 }} />
+          <Tooltip
+            content={tab === 'dow' ? <DowTooltip /> : undefined}
+            contentStyle={{ background: '#0b0f17', border: '1px solid #1f2937', fontSize: 12 }}
+          />
           <Bar dataKey="pnl">
             {rows?.map((r, i) => (
               <Cell key={i} fill={r.pnl >= 0 ? '#22c55e' : '#ef4444'} />
             ))}
+            {tab === 'dow' && (
+              <LabelList
+                dataKey="win_rate"
+                position="top"
+                fill="#e5e7eb"
+                fontSize={11}
+                formatter={(v) => (v != null ? `${v.toFixed(0)}%` : '')}
+              />
+            )}
+            {tab === 'dow' && (
+              <LabelList
+                dataKey="trades"
+                position="bottom"
+                fill="#6b7280"
+                fontSize={10}
+                formatter={(v) => (v != null ? `n=${v}` : '')}
+              />
+            )}
           </Bar>
         </BarChart>
       </ResponsiveContainer>

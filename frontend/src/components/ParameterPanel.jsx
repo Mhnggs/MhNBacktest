@@ -61,6 +61,34 @@ function Toggle({ value, onChange, label }) {
   )
 }
 
+const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+
+function DayToggles({ value, onChange }) {
+  const active = new Set(value || [])
+  const toggle = (idx) => {
+    const next = new Set(active)
+    if (next.has(idx)) next.delete(idx); else next.add(idx)
+    onChange(Array.from(next).sort((a, b) => a - b))
+  }
+  return (
+    <div className="grid grid-cols-5 gap-1">
+      {DAY_LABELS.map((label, i) => {
+        const on = active.has(i)
+        return (
+          <button
+            key={i}
+            type="button"
+            onClick={() => toggle(i)}
+            className={`btn ${on ? 'btn-primary' : 'btn-ghost'} px-0 py-1 text-xs`}
+          >
+            {label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function Section({ title, children }) {
   return (
     <div className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
@@ -165,6 +193,11 @@ export default function ParameterPanel() {
           ADX {'>'} 25 = trending market. Below 25 is choppy — signals are skipped.
           Longs also require +DI {'>'} -DI; shorts require -DI {'>'} +DI.
         </div>
+      </Section>
+
+      <Section title="Day Filter">
+        <DayToggles value={params.allowed_days} onChange={(v) => setParam('allowed_days', v)} />
+        <div className="text-[11px] text-gray-500">Based on backtest timezone.</div>
       </Section>
 
       <Section title="Filters">
