@@ -133,8 +133,8 @@ def _session_windows(params: StrategyParams) -> list[tuple[str, str, str, str]]:
     return windows
 
 
-def _active_window(ts: pd.Timestamp, params: StrategyParams) -> Optional[str]:
-    """Return the session label for the first window containing ``ts``.
+def _active_window(ts: pd.Timestamp, params: StrategyParams):
+    """Return (label, end_hhmm, tz_name) for the first window containing ``ts``.
 
     NY is checked first, then London, then Asian — so overlaps favour the
     market the user is centred on.
@@ -144,20 +144,19 @@ def _active_window(ts: pd.Timestamp, params: StrategyParams) -> Optional[str]:
         local = ts.tz_convert(tz) if ts.tzinfo else tz.localize(ts.to_pydatetime())
         t = local.time()
         if _parse_time(start) <= t <= _parse_time(end):
-            return label
+            return label, end, tz_name
     return None
 
 
-def _ny_cutoff_ts(ts: pd.Timestamp, params: StrategyParams) -> pd.Timestamp:
-    """Next 15:00 America/New_York at or after ``ts`` — global force-close deadline."""
-    tz = pytz.timezone(params.timezone)
+def _session_end_ts(ts: pd.Timestamp, end_hhmm: str, tz_name: str) -> pd.Timestamp:
+    """Timestamp for the end of the given session window on the local date of ``ts``."""
+    tz = pytz.timezone(tz_name)
     local = ts.tz_convert(tz) if ts.tzinfo else tz.localize(ts.to_pydatetime())
-    cutoff_local = local.replace(hour=15, minute=0, second=0, microsecond=0)
-    if local >= cutoff_local:
-        cutoff_local = cutoff_local + pd.Timedelta(days=1)
+    eh, em = end_hhmm.split(":")
+    end_local = local.replace(hour=int(eh), minute=int(em), second=0, microsecond=0)
     if ts.tzinfo:
-        return pd.Timestamp(cutoff_local).tz_convert("UTC")
-    return pd.Timestamp(cutoff_local.replace(tzinfo=None))
+        return pd.Timestamp(end_local).tz_convert("UTC")
+    return pd.Timestamp(end_local.replace(tzinfo=None))
 
 
 def _resolve_pattern_columns(allowed_keys: tuple) -> tuple[list[str], list[str]]:
@@ -206,7 +205,10 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     work["_local_dow"] = local_ts.dt.dayofweek
 
     # Resolve session membership per bar.
-    work["_session_label"] = work["datetime"].apply(lambda ts: _active_window(ts, params))
+    active = work["datetime"].apply(lambda ts: _active_window(ts, params))
+    work["_session_label"] = active.apply(lambda a: a[0] if a else None)
+    work["_session_end_hhmm"] = active.apply(lambda a: a[1] if a else None)
+    work["_session_tz"] = active.apply(lambda a: a[2] if a else None)
 
     allowed_days = {int(d) for d in params.allowed_days}
     bull_cols, bear_cols = _resolve_pattern_columns(tuple(params.allowed_patterns))
@@ -367,7 +369,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
                 stop=stop, target=target, risk_per_unit=stop_distance,
                 units=units, pattern=pattern, session=session_label,
             )
-            open_trade_end_ts = _ny_cutoff_ts(ts, params)
+            open_trade_end_ts = _session_end_ts(ts, bar["_session_end_hhmm"], bar["_session_tz"])
             next_id += 1
             daily_count[session_date] = daily_count.get(session_date, 0) + 1
 
@@ -392,7 +394,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
                 stop=stop, target=target, risk_per_unit=stop_distance,
                 units=units, pattern=pattern, session=session_label,
             )
-            open_trade_end_ts = _ny_cutoff_ts(ts, params)
+            open_trade_end_ts = _session_end_ts(ts, bar["_session_end_hhmm"], bar["_session_tz"])
             next_id += 1
             daily_count[session_date] = daily_count.get(session_date, 0) + 1
 
