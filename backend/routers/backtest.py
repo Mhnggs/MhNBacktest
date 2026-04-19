@@ -18,6 +18,23 @@ from ..services.strategy import StrategyParams, run_backtest
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 
+def _candles_with_indicators(df: pd.DataFrame, ema_period: int, ema_secondary: int,
+                             adx_period: int) -> list[dict]:
+    """Attach indicators and serialize OHLCV rows for the candle chart."""
+    from ..services.indicators import build_indicator_frame
+
+    with_ind = build_indicator_frame(
+        df,
+        ema_period=ema_period,
+        ema_secondary=ema_secondary,
+        adx_period=adx_period,
+    )
+    return (
+        with_ind.assign(datetime=lambda d: d["datetime"].astype(str))
+        .to_dict("records")
+    )
+
+
 def _load_filtered_df(req: BacktestRequest) -> pd.DataFrame:
     session = get_dataset(req.session_id)
     if session is None:
@@ -77,15 +94,31 @@ def run(req: BacktestRequest):
 
     segment = _run_segment(df, params)
 
-    candles = (
-        df.assign(datetime=lambda d: d["datetime"].astype(str))
-        .to_dict("records")
+    candles = _candles_with_indicators(
+        df, params.ema_period, params.ema_secondary, params.adx_period,
     )
 
     return {
         **segment,
         "session_markers": _session_markers(params),
         "candles": candles,
+    }
+
+
+@router.post("/candles")
+def candles(req: BacktestRequest):
+    """Return candles with indicator overlays for the chart, without running the strategy.
+
+    Useful when a backtest produces zero trades and you still want to inspect
+    VWAP / EMA / price action for the filtered range.
+    """
+    df = _load_filtered_df(req)
+    params = StrategyParams(**req.params.model_dump())
+    return {
+        "candles": _candles_with_indicators(
+            df, params.ema_period, params.ema_secondary, params.adx_period,
+        ),
+        "session_markers": _session_markers(params),
     }
 
 
