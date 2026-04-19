@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useBacktestStore } from '../store/useBacktestStore'
 import { getOptimizeOptions, runAutoRobust } from '../api/client'
+import { SESSION_SCOPES, applySessionScope } from '../util/sessionScope'
 
 const METRIC_LABELS = {
   sharpe_ratio: 'Sharpe Ratio',
@@ -133,6 +134,7 @@ export default function FindRobust() {
   const [topK, setTopK] = useState(10)
   const [minTestTrades, setMinTestTrades] = useState(5)
   const [onlyPassing, setOnlyPassing] = useState(true)
+  const [sessionScope, setSessionScope] = useState('all')
 
   useEffect(() => {
     getOptimizeOptions().then((d) => setOptions(d.params || [])).catch(() => {})
@@ -174,7 +176,7 @@ export default function FindRobust() {
     try {
       const data = await runAutoRobust({
         session_id: sessionId,
-        params,
+        params: applySessionScope(params, sessionScope),
         start_date: startDate || null,
         end_date: endDate || null,
         sweeps: axes.map((a) => ({ key: a.key, values: range(a.start, a.end, a.step) })),
@@ -236,11 +238,18 @@ export default function FindRobust() {
           )}
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
           <div>
             <div className="label">Rank by</div>
             <select className="input text-xs py-1" value={metric} onChange={(e) => setMetric(e.target.value)}>
               {Object.entries(METRIC_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="label">Session</div>
+            <select className="input text-xs py-1" value={sessionScope}
+              onChange={(e) => setSessionScope(e.target.value)}>
+              {SESSION_SCOPES.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
             </select>
           </div>
           <div>

@@ -39,7 +39,13 @@ class StrategyParams:
     risk_per_trade_pct: float = 1.0
     max_trades_per_day: int = 3
 
+    # Partial take-profit
+    use_partial_tp: bool = False
+    partial_tp_r: float = 1.5
+    partial_tp_pct: float = 50.0
+
     # NY session (supports a morning + afternoon window)
+    use_ny: bool = True
     session_start: str = "09:45"
     session_end: str = "11:30"
     session_2_start: str = "13:30"
@@ -81,11 +87,18 @@ class Trade:
     pnl_pct: float = 0.0
     result: str = "open"
     bars_held: int = 0
+    partial_taken: bool = False
+    partial_pnl: float = 0.0
+    partial_exit_time: Optional[pd.Timestamp] = None
+    partial_exit_price: Optional[float] = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["entry_time"] = self.entry_time.isoformat()
         d["exit_time"] = self.exit_time.isoformat() if self.exit_time is not None else None
+        d["partial_exit_time"] = (
+            self.partial_exit_time.isoformat() if self.partial_exit_time is not None else None
+        )
         return d
 
 
@@ -100,13 +113,15 @@ def _session_windows(params: StrategyParams) -> list[tuple[str, str, str, str]]:
     NY morning is always on. NY afternoon, London, and Asian are each gated
     by their enable flag.
     """
-    windows: list[tuple[str, str, str, str]] = [
-        ("NY", params.session_start, params.session_end, params.timezone),
-    ]
-    if params.use_session_2:
+    windows: list[tuple[str, str, str, str]] = []
+    if params.use_ny:
         windows.append(
-            ("NY", params.session_2_start, params.session_2_end, params.timezone),
+            ("NY", params.session_start, params.session_end, params.timezone),
         )
+        if params.use_session_2:
+            windows.append(
+                ("NY", params.session_2_start, params.session_2_end, params.timezone),
+            )
     if params.use_london:
         windows.append(
             ("London", params.london_start, params.london_end, params.london_tz),
@@ -241,34 +256,60 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             high, low, close = bar["high"], bar["low"], bar["close"]
             t = open_trade
 
+            # Partial take-profit: if price reaches r-multiple, bank part of
+            # the position and move the stop to break-even. Only runs once.
+            if params.use_partial_tp and not t.partial_taken:
+                partial_r = float(params.partial_tp_r)
+                partial_frac = float(params.partial_tp_pct) / 100.0
+                if t.direction == "long":
+                    partial_price = t.entry_price + t.risk_per_unit * partial_r
+                    if high >= partial_price:
+                        closed_units = t.units * partial_frac
+                        t.partial_pnl = (partial_price - t.entry_price) * closed_units
+                        t.partial_exit_price = partial_price
+                        t.partial_exit_time = ts
+                        t.units = t.units - closed_units
+                        t.stop = t.entry_price  # move to break-even
+                        t.partial_taken = True
+                else:  # short
+                    partial_price = t.entry_price - t.risk_per_unit * partial_r
+                    if low <= partial_price:
+                        closed_units = t.units * partial_frac
+                        t.partial_pnl = (t.entry_price - partial_price) * closed_units
+                        t.partial_exit_price = partial_price
+                        t.partial_exit_time = ts
+                        t.units = t.units - closed_units
+                        t.stop = t.entry_price
+                        t.partial_taken = True
+
             if t.direction == "long":
                 if low <= t.stop:
                     t.exit_price = t.stop
                     t.exit_time = ts
-                    t.pnl = (t.stop - t.entry_price) * t.units
+                    t.pnl = (t.stop - t.entry_price) * t.units + t.partial_pnl
                     t.result = "loss" if t.pnl < 0 else "breakeven"
                 elif high >= t.target:
                     t.exit_price = t.target
                     t.exit_time = ts
-                    t.pnl = (t.target - t.entry_price) * t.units
+                    t.pnl = (t.target - t.entry_price) * t.units + t.partial_pnl
                     t.result = "win"
             else:  # short
                 if high >= t.stop:
                     t.exit_price = t.stop
                     t.exit_time = ts
-                    t.pnl = (t.entry_price - t.stop) * t.units
+                    t.pnl = (t.entry_price - t.stop) * t.units + t.partial_pnl
                     t.result = "loss" if t.pnl < 0 else "breakeven"
                 elif low <= t.target:
                     t.exit_price = t.target
                     t.exit_time = ts
-                    t.pnl = (t.entry_price - t.target) * t.units
+                    t.pnl = (t.entry_price - t.target) * t.units + t.partial_pnl
                     t.result = "win"
 
             if t.exit_time is None and open_trade_end_ts is not None and ts >= open_trade_end_ts:
                 if t.direction == "long":
-                    t.pnl = (close - t.entry_price) * t.units
+                    t.pnl = (close - t.entry_price) * t.units + t.partial_pnl
                 else:
-                    t.pnl = (t.entry_price - close) * t.units
+                    t.pnl = (t.entry_price - close) * t.units + t.partial_pnl
                 t.exit_price = close
                 t.exit_time = ts
                 t.result = "timeout"

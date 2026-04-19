@@ -10,6 +10,7 @@ export const defaultParams = {
   starting_capital: 10000,
   risk_per_trade_pct: 1.0,
   max_trades_per_day: 3,
+  use_ny: true,
   session_start: '09:45',
   session_end: '11:30',
   session_2_start: '13:30',
@@ -25,6 +26,10 @@ export const defaultParams = {
   asian_end: '12:00',
   asian_tz: 'Asia/Tokyo',
   allowed_days: [0, 1, 2, 3, 4],
+
+  use_partial_tp: false,
+  partial_tp_r: 1.5,
+  partial_tp_pct: 50,
 }
 
 export const useBacktestStore = create((set, get) => ({
@@ -58,14 +63,19 @@ export const useBacktestStore = create((set, get) => ({
   // Auto Robust
   autoRobustResults: null,
 
-  setSession: ({ sessionId, summary, sample, source }) =>
+  setSession: ({ sessionId, summary, sample, source }) => {
+    const startIso = summary?.date_range?.start || ''
+    const endIso = summary?.date_range?.end || ''
     set({
       sessionId,
       dataSummary: summary,
       dataSample: sample || [],
       dataSource: source || get().dataSource,
+      startDate: startIso ? startIso.slice(0, 10) : '',
+      endDate: endIso ? endIso.slice(0, 10) : '',
       results: null,
-    }),
+    })
+  },
 
   setDataSource: (dataSource) => set({ dataSource }),
 

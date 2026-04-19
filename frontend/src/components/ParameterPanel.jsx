@@ -163,6 +163,10 @@ export default function ParameterPanel() {
       setError('Select at least one candlestick pattern to use as entry trigger.')
       return
     }
+    if (!params.use_ny && !params.use_london && !params.use_asian) {
+      setError('Enable at least one session (NY, London, or Asian).')
+      return
+    }
     setRunning(true)
     setError(null)
     try {
@@ -241,31 +245,54 @@ export default function ParameterPanel() {
         </Field>
       </Section>
 
-      <Section title="NY Session">
-        <div className="grid grid-cols-2 gap-2">
-          <Field label="Morning Start">
-            <input className="input" type="time" value={params.session_start} onChange={(e) => setParam('session_start', e.target.value)} />
-          </Field>
-          <Field label="Morning End">
-            <input className="input" type="time" value={params.session_end} onChange={(e) => setParam('session_end', e.target.value)} />
-          </Field>
-        </div>
-        <Toggle label="Use Afternoon Window" value={params.use_session_2} onChange={(v) => setParam('use_session_2', v)} />
-        {params.use_session_2 && (
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Afternoon Start">
-              <input className="input" type="time" value={params.session_2_start} onChange={(e) => setParam('session_2_start', e.target.value)} />
+      <Section title="Partial Take-Profit">
+        <Toggle label="Enable Partial TP" value={params.use_partial_tp} onChange={(v) => setParam('use_partial_tp', v)} />
+        {params.use_partial_tp && (
+          <>
+            <Field label={`Take partial at (${params.partial_tp_r}R)`}>
+              <Slider value={params.partial_tp_r} onChange={(v) => setParam('partial_tp_r', v)} min={0.5} max={3.0} step={0.1} />
             </Field>
-            <Field label="Afternoon End">
-              <input className="input" type="time" value={params.session_2_end} onChange={(e) => setParam('session_2_end', e.target.value)} />
+            <Field label={`% of position closed (${params.partial_tp_pct}%)`}>
+              <Slider value={params.partial_tp_pct} onChange={(v) => setParam('partial_tp_pct', v)} min={10} max={90} step={5} />
             </Field>
-          </div>
+            <div className="text-[11px] text-gray-500 leading-relaxed">
+              Closes that % of the position once price reaches the R-multiple,
+              then moves stop to break-even for the runner.
+            </div>
+          </>
         )}
-        <Field label="NY Timezone">
-          <select className="input" value={params.timezone} onChange={(e) => setParam('timezone', e.target.value)}>
-            {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
-          </select>
-        </Field>
+      </Section>
+
+      <Section title="NY Session">
+        <Toggle label="Enable NY" value={params.use_ny} onChange={(v) => setParam('use_ny', v)} />
+        {params.use_ny && (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Morning Start">
+                <input className="input" type="time" value={params.session_start} onChange={(e) => setParam('session_start', e.target.value)} />
+              </Field>
+              <Field label="Morning End">
+                <input className="input" type="time" value={params.session_end} onChange={(e) => setParam('session_end', e.target.value)} />
+              </Field>
+            </div>
+            <Toggle label="Use Afternoon Window" value={params.use_session_2} onChange={(v) => setParam('use_session_2', v)} />
+            {params.use_session_2 && (
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Afternoon Start">
+                  <input className="input" type="time" value={params.session_2_start} onChange={(e) => setParam('session_2_start', e.target.value)} />
+                </Field>
+                <Field label="Afternoon End">
+                  <input className="input" type="time" value={params.session_2_end} onChange={(e) => setParam('session_2_end', e.target.value)} />
+                </Field>
+              </div>
+            )}
+            <Field label="NY Timezone">
+              <select className="input" value={params.timezone} onChange={(e) => setParam('timezone', e.target.value)}>
+                {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
+              </select>
+            </Field>
+          </>
+        )}
       </Section>
 
       <Section title="London Session">

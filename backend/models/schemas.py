@@ -28,7 +28,14 @@ class StrategyParamsSchema(BaseModel):
     risk_per_trade_pct: float = Field(1.0, gt=0.0, le=100.0)
     max_trades_per_day: int = Field(3, ge=1, le=50)
 
+    # Partial take-profit: close `partial_tp_pct`% of the position at
+    # `partial_tp_r` × risk and move stop to breakeven for the runner.
+    use_partial_tp: bool = False
+    partial_tp_r: float = Field(1.5, gt=0.0, le=10.0)
+    partial_tp_pct: float = Field(50.0, gt=0.0, lt=100.0)
+
     # Session (NY — supports a morning + afternoon window)
+    use_ny: bool = True
     session_start: str = "09:45"
     session_end: str = "11:30"
     session_2_start: str = "13:30"
