@@ -30,6 +30,16 @@ export async function runWalkForward(payload) {
   return res.data
 }
 
+export async function getOptimizeOptions() {
+  const res = await api.get('/backtest/optimize/options')
+  return res.data
+}
+
+export async function runOptimize(payload) {
+  const res = await api.post('/backtest/optimize', payload)
+  return res.data
+}
+
 export async function listSessions() {
   const res = await api.get('/data/sessions')
   return res.data

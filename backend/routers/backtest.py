@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 
-from ..models.schemas import BacktestRequest, WalkForwardRequest
+from ..models.schemas import BacktestRequest, OptimizeRequest, WalkForwardRequest
 from ..services.performance import (
     compute_stats,
     dow_breakdown,
@@ -129,6 +129,117 @@ def _consistency_score(train_stats: dict, test_stats: dict) -> dict:
         "test_sharpe": test_sharpe,
         "train_profit_factor": float(train_stats.get("profit_factor") or 0.0),
         "test_profit_factor": test_pf,
+    }
+
+
+OPTIMIZE_ALLOWED_PARAMS = {
+    "ema_period": {"type": int, "label": "EMA Fast", "min": 3, "max": 100},
+    "ema_secondary": {"type": int, "label": "EMA Slow", "min": 3, "max": 200},
+    "volume_multiplier": {"type": float, "label": "Volume ×", "min": 0.5, "max": 5.0},
+    "risk_reward": {"type": float, "label": "Risk/Reward", "min": 0.5, "max": 8.0},
+    "adx_threshold": {"type": float, "label": "ADX Threshold", "min": 10.0, "max": 60.0},
+    "adx_period": {"type": int, "label": "ADX Period", "min": 5, "max": 50},
+    "vwap_max_distance_pct": {"type": float, "label": "VWAP Distance %", "min": 0.1, "max": 10.0},
+    "chop_filter_crossings": {"type": int, "label": "Chop Crossings", "min": 0, "max": 20},
+    "stop_buffer_ticks": {"type": int, "label": "Stop Buffer Ticks", "min": 0, "max": 100},
+    "max_trades_per_day": {"type": int, "label": "Max Trades/Day", "min": 1, "max": 50},
+}
+
+OPTIMIZE_METRICS = {
+    "sharpe_ratio", "total_return_pct", "profit_factor",
+    "total_trades", "win_rate", "max_drawdown_pct",
+}
+
+OPTIMIZE_MAX_CELLS = 400
+
+
+def _coerce(name: str, value: float):
+    spec = OPTIMIZE_ALLOWED_PARAMS[name]
+    lo, hi = spec["min"], spec["max"]
+    value = max(lo, min(hi, value))
+    return spec["type"](round(value)) if spec["type"] is int else float(value)
+
+
+@router.get("/optimize/options")
+def optimize_options():
+    return {
+        "params": [
+            {"key": k, "label": v["label"], "min": v["min"], "max": v["max"],
+             "integer": v["type"] is int}
+            for k, v in OPTIMIZE_ALLOWED_PARAMS.items()
+        ],
+        "metrics": sorted(OPTIMIZE_METRICS),
+        "max_cells": OPTIMIZE_MAX_CELLS,
+    }
+
+
+@router.post("/optimize")
+def optimize(req: OptimizeRequest):
+    if req.x_param not in OPTIMIZE_ALLOWED_PARAMS or req.y_param not in OPTIMIZE_ALLOWED_PARAMS:
+        raise HTTPException(400, f"Param must be one of {sorted(OPTIMIZE_ALLOWED_PARAMS)}")
+    if req.x_param == req.y_param:
+        raise HTTPException(400, "x_param and y_param must differ")
+    if req.metric not in OPTIMIZE_METRICS:
+        raise HTTPException(400, f"metric must be one of {sorted(OPTIMIZE_METRICS)}")
+    if not req.x_values or not req.y_values:
+        raise HTTPException(400, "x_values and y_values cannot be empty")
+    total_cells = len(req.x_values) * len(req.y_values)
+    if total_cells > OPTIMIZE_MAX_CELLS:
+        raise HTTPException(
+            400,
+            f"{total_cells} cells exceeds cap of {OPTIMIZE_MAX_CELLS}. Widen the step.",
+        )
+
+    df = _load_filtered_df(req)
+    base_params = req.params.model_dump()
+
+    x_vals = [_coerce(req.x_param, v) for v in req.x_values]
+    y_vals = [_coerce(req.y_param, v) for v in req.y_values]
+
+    grid: list[list[dict]] = []
+    best = None
+    for yv in y_vals:
+        row: list[dict] = []
+        for xv in x_vals:
+            overrides = {**base_params, req.x_param: xv, req.y_param: yv}
+            params = StrategyParams(**overrides)
+            try:
+                run_result = run_backtest(df, params)
+                stats = compute_stats(
+                    run_result["trades"], run_result["equity_curve"], params.starting_capital,
+                )
+                metric_value = float(stats.get(req.metric) or 0.0)
+                cell = {
+                    "x": xv,
+                    "y": yv,
+                    "metric_value": metric_value,
+                    "total_trades": int(stats.get("total_trades") or 0),
+                    "win_rate": float(stats.get("win_rate") or 0.0),
+                    "profit_factor": float(stats.get("profit_factor") or 0.0),
+                    "sharpe_ratio": float(stats.get("sharpe_ratio") or 0.0),
+                    "total_return_pct": float(stats.get("total_return_pct") or 0.0),
+                    "max_drawdown_pct": float(stats.get("max_drawdown_pct") or 0.0),
+                }
+            except Exception as exc:  # noqa: BLE001
+                cell = {
+                    "x": xv, "y": yv, "metric_value": 0.0, "error": str(exc),
+                    "total_trades": 0, "win_rate": 0.0, "profit_factor": 0.0,
+                    "sharpe_ratio": 0.0, "total_return_pct": 0.0, "max_drawdown_pct": 0.0,
+                }
+            row.append(cell)
+            if best is None or cell["metric_value"] > best["metric_value"]:
+                best = cell
+        grid.append(row)
+
+    return {
+        "x_param": req.x_param,
+        "y_param": req.y_param,
+        "metric": req.metric,
+        "x_values": x_vals,
+        "y_values": y_vals,
+        "grid": grid,
+        "best": best,
+        "cells_run": total_cells,
     }
 
 

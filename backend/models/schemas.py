@@ -57,6 +57,17 @@ class WalkForwardRequest(BacktestRequest):
     train_pct: float = Field(0.7, ge=0.1, le=0.9)
 
 
+class OptimizeRequest(BacktestRequest):
+    x_param: str
+    x_values: list[float]
+    y_param: str
+    y_values: list[float]
+    metric: str = Field(
+        "sharpe_ratio",
+        description="Stat name to display in the heatmap",
+    )
+
+
 class UploadResponse(BaseModel):
     session_id: str
     rows_loaded: int

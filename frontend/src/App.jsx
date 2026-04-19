@@ -7,11 +7,13 @@ import CandleChart from './components/CandleChart'
 import TradeLog from './components/TradeLog'
 import Breakdowns from './components/Breakdowns'
 import WalkForward from './components/WalkForward'
+import Optimize from './components/Optimize'
 import { useBacktestStore } from './store/useBacktestStore'
 
 const VIEWS = [
   { key: 'backtest', label: 'Backtest' },
   { key: 'walkforward', label: 'Walk Forward' },
+  { key: 'optimize', label: 'Optimize' },
 ]
 
 export default function App() {
@@ -62,9 +64,13 @@ export default function App() {
               <TradeLog />
             </div>
           </>
-        ) : (
+        ) : activeView === 'walkforward' ? (
           <section className="lg:col-span-9">
             <WalkForward />
+          </section>
+        ) : (
+          <section className="lg:col-span-9">
+            <Optimize />
           </section>
         )}
       </main>
