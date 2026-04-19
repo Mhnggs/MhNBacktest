@@ -44,6 +44,10 @@ class StrategyParams:
     partial_tp_r: float = 1.5
     partial_tp_pct: float = 50.0
 
+    # Standalone breakeven (doesn't close anything)
+    use_breakeven: bool = False
+    breakeven_r: float = 1.5
+
     # NY session (supports a morning + afternoon window)
     use_ny: bool = True
     session_start: str = "09:45"
@@ -87,6 +91,7 @@ class Trade:
     pnl_pct: float = 0.0
     result: str = "open"
     bars_held: int = 0
+    breakeven_moved: bool = False
     partial_taken: bool = False
     partial_pnl: float = 0.0
     partial_exit_time: Optional[pd.Timestamp] = None
@@ -281,6 +286,21 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
                         t.units = t.units - closed_units
                         t.stop = t.entry_price
                         t.partial_taken = True
+
+            # Standalone breakeven: move stop to entry once price runs
+            # in favour by `breakeven_r` × risk. Does not close any units.
+            if params.use_breakeven and not t.breakeven_moved:
+                be_r = float(params.breakeven_r)
+                if t.direction == "long":
+                    be_trigger = t.entry_price + t.risk_per_unit * be_r
+                    if high >= be_trigger:
+                        t.stop = max(t.stop, t.entry_price)
+                        t.breakeven_moved = True
+                else:
+                    be_trigger = t.entry_price - t.risk_per_unit * be_r
+                    if low <= be_trigger:
+                        t.stop = min(t.stop, t.entry_price)
+                        t.breakeven_moved = True
 
             if t.direction == "long":
                 if low <= t.stop:

@@ -21,6 +21,7 @@ const VIEWS = [
 export default function App() {
   const activeView = useBacktestStore((s) => s.activeView)
   const setActiveView = useBacktestStore((s) => s.setActiveView)
+  const results = useBacktestStore((s) => s.results)
 
   return (
     <div className="min-h-full">
@@ -39,6 +40,15 @@ export default function App() {
                 {v.label}
               </button>
             ))}
+            {activeView === 'backtest' && results && (
+              <button
+                onClick={() => window.print()}
+                className="btn btn-ghost px-4 py-1.5 text-xs ml-2"
+                title="Save report as PDF via browser print dialog"
+              >
+                Download PDF
+              </button>
+            )}
           </div>
         </div>
       </header>

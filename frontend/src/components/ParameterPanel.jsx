@@ -263,6 +263,21 @@ export default function ParameterPanel() {
         )}
       </Section>
 
+      <Section title="Break-Even Stop">
+        <Toggle label="Enable Breakeven" value={params.use_breakeven} onChange={(v) => setParam('use_breakeven', v)} />
+        {params.use_breakeven && (
+          <>
+            <Field label={`Move SL to BE at (${params.breakeven_r}R)`}>
+              <Slider value={params.breakeven_r} onChange={(v) => setParam('breakeven_r', v)} min={0.5} max={3.0} step={0.1} />
+            </Field>
+            <div className="text-[11px] text-gray-500 leading-relaxed">
+              When price runs in your favour by this R-multiple, the stop
+              jumps to your entry price. Nothing is closed.
+            </div>
+          </>
+        )}
+      </Section>
+
       <Section title="NY Session">
         <Toggle label="Enable NY" value={params.use_ny} onChange={(v) => setParam('use_ny', v)} />
         {params.use_ny && (

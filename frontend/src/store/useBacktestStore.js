@@ -30,6 +30,9 @@ export const defaultParams = {
   use_partial_tp: false,
   partial_tp_r: 1.5,
   partial_tp_pct: 50,
+
+  use_breakeven: false,
+  breakeven_r: 1.5,
 }
 
 export const useBacktestStore = create((set, get) => ({

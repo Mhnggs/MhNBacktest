@@ -34,6 +34,11 @@ class StrategyParamsSchema(BaseModel):
     partial_tp_r: float = Field(1.5, gt=0.0, le=10.0)
     partial_tp_pct: float = Field(50.0, gt=0.0, lt=100.0)
 
+    # Standalone breakeven: move stop to entry price once price reaches
+    # `breakeven_r` × risk in favour, without closing anything.
+    use_breakeven: bool = False
+    breakeven_r: float = Field(1.5, gt=0.0, le=10.0)
+
     # Session (NY — supports a morning + afternoon window)
     use_ny: bool = True
     session_start: str = "09:45"
