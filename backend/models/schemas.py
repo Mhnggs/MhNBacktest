@@ -53,6 +53,10 @@ class BacktestRequest(BaseModel):
     end_date: Optional[str] = None
 
 
+class WalkForwardRequest(BacktestRequest):
+    train_pct: float = Field(0.7, ge=0.1, le=0.9)
+
+
 class UploadResponse(BaseModel):
     session_id: str
     rows_loaded: int

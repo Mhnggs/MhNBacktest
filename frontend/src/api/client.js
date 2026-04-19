@@ -25,6 +25,11 @@ export async function runBacktest(payload) {
   return res.data
 }
 
+export async function runWalkForward(payload) {
+  const res = await api.post('/backtest/walkforward', payload)
+  return res.data
+}
+
 export async function listSessions() {
   const res = await api.get('/data/sessions')
   return res.data

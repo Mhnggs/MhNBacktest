@@ -50,6 +50,11 @@ export const useBacktestStore = create((set, get) => ({
   selectedTradeId: null,
   error: null,
 
+  // View / walk-forward
+  activeView: 'backtest', // 'backtest' | 'walkforward'
+  walkForwardResults: null,
+  walkForwardTrainPct: 0.7,
+
   setSession: ({ sessionId, summary, sample, source }) =>
     set({
       sessionId,
@@ -72,4 +77,8 @@ export const useBacktestStore = create((set, get) => ({
   setResults: (results) => set({ results, error: null }),
   setError: (error) => set({ error, isRunning: false }),
   selectTrade: (id) => set({ selectedTradeId: id }),
+
+  setActiveView: (activeView) => set({ activeView }),
+  setWalkForwardResults: (walkForwardResults) => set({ walkForwardResults, error: null }),
+  setWalkForwardTrainPct: (walkForwardTrainPct) => set({ walkForwardTrainPct }),
 }))

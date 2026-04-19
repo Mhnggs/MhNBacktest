@@ -6,8 +6,18 @@ import EquityCurve from './components/EquityCurve'
 import CandleChart from './components/CandleChart'
 import TradeLog from './components/TradeLog'
 import Breakdowns from './components/Breakdowns'
+import WalkForward from './components/WalkForward'
+import { useBacktestStore } from './store/useBacktestStore'
+
+const VIEWS = [
+  { key: 'backtest', label: 'Backtest' },
+  { key: 'walkforward', label: 'Walk Forward' },
+]
 
 export default function App() {
+  const activeView = useBacktestStore((s) => s.activeView)
+  const setActiveView = useBacktestStore((s) => s.setActiveView)
+
   return (
     <div className="min-h-full">
       <header className="border-b border-border bg-panel/60 backdrop-blur sticky top-0 z-10">
@@ -15,7 +25,17 @@ export default function App() {
           <h1 className="text-lg font-semibold tracking-tight">
             VWAP + EMA Pullback <span className="text-accent">Backtest</span>
           </h1>
-          <div className="text-xs text-gray-400">Day-trading research dashboard</div>
+          <div className="flex items-center gap-1">
+            {VIEWS.map((v) => (
+              <button
+                key={v.key}
+                onClick={() => setActiveView(v.key)}
+                className={`btn px-4 py-1.5 text-xs ${activeView === v.key ? 'btn-primary' : 'btn-ghost'}`}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
@@ -25,20 +45,28 @@ export default function App() {
           <ParameterPanel />
         </aside>
 
-        <section className="lg:col-span-6 space-y-4">
-          <EquityCurve />
-          <CandleChart />
-          <Breakdowns />
-        </section>
+        {activeView === 'backtest' ? (
+          <>
+            <section className="lg:col-span-6 space-y-4">
+              <EquityCurve />
+              <CandleChart />
+              <Breakdowns />
+            </section>
 
-        <aside className="lg:col-span-3 space-y-4">
-          <StatsPanel />
-          <Diagnostics />
-        </aside>
+            <aside className="lg:col-span-3 space-y-4">
+              <StatsPanel />
+              <Diagnostics />
+            </aside>
 
-        <div className="lg:col-span-12">
-          <TradeLog />
-        </div>
+            <div className="lg:col-span-12">
+              <TradeLog />
+            </div>
+          </>
+        ) : (
+          <section className="lg:col-span-9">
+            <WalkForward />
+          </section>
+        )}
       </main>
 
       <footer className="border-t border-border py-4 text-center text-xs text-gray-500">
