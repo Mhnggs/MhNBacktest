@@ -19,6 +19,7 @@ from ..services.performance import (
     dow_breakdown,
     hourly_breakdown,
     monthly_breakdown,
+    session_breakdown,
 )
 from ..services.store import get_dataset
 from ..services.strategy import StrategyParams, run_backtest
@@ -92,6 +93,7 @@ def _run_segment(df: pd.DataFrame, params: StrategyParams) -> dict:
         "monthly_breakdown": monthly_breakdown(result["trades"]),
         "dow_breakdown": dow_breakdown(result["trades"]),
         "hourly_breakdown": hourly_breakdown(result["trades"], params.timezone),
+        "session_breakdown": session_breakdown(result["trades"]),
         "diagnostics": result.get("diagnostics", {}),
     }
 

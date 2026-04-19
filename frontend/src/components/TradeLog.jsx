@@ -19,7 +19,7 @@ function fmtPct(v, digits = 2) {
 function exportCsv(trades) {
   if (!trades || !trades.length) return
   const cols = [
-    'id', 'direction', 'pattern', 'entry_time', 'entry_price', 'stop',
+    'id', 'direction', 'session', 'pattern', 'entry_time', 'entry_price', 'stop',
     'target', 'exit_time', 'exit_price', 'pnl', 'pnl_pct', 'result',
   ]
   const lines = [cols.join(',')]
@@ -51,6 +51,7 @@ export default function TradeLog() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [dow, setDow] = useState('all')
+  const [sessionFilter, setSessionFilter] = useState('all')
   const [sortKey, setSortKey] = useState('entry_time')
   const [sortDir, setSortDir] = useState('asc')
   const [page, setPage] = useState(1)
@@ -67,6 +68,9 @@ export default function TradeLog() {
       const target = Number(dow)
       rows = rows.filter((t) => dayIndex(t.entry_time) === target)
     }
+    if (sessionFilter !== 'all') {
+      rows = rows.filter((t) => (t.session || '') === sessionFilter)
+    }
     rows = [...rows].sort((a, b) => {
       const av = a[sortKey], bv = b[sortKey]
       if (av === bv) return 0
@@ -74,7 +78,13 @@ export default function TradeLog() {
       return sortDir === 'asc' ? cmp : -cmp
     })
     return rows
-  }, [trades, direction, result, dateFrom, dateTo, dow, sortKey, sortDir])
+  }, [trades, direction, result, dateFrom, dateTo, dow, sessionFilter, sortKey, sortDir])
+
+  const sessionChoices = useMemo(() => {
+    const s = new Set()
+    for (const t of trades) if (t.session) s.add(t.session)
+    return Array.from(s).sort()
+  }, [trades])
 
   const summary = useMemo(() => {
     const n = filtered.length
@@ -109,6 +119,7 @@ export default function TradeLog() {
 
   function clearFilters() {
     setDirection('all'); setResult('all'); setDateFrom(''); setDateTo(''); setDow('all')
+    setSessionFilter('all')
     setPage(1)
   }
 
@@ -141,6 +152,13 @@ export default function TradeLog() {
           <option value="all">All Days</option>
           {DOW_LABELS.map((d, i) => <option key={i} value={i}>{d}</option>)}
         </select>
+        {sessionChoices.length > 0 && (
+          <select className="input w-auto text-xs py-1" value={sessionFilter}
+            onChange={(e) => { setSessionFilter(e.target.value); setPage(1) }}>
+            <option value="all">All Sessions</option>
+            {sessionChoices.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        )}
         <input className="input w-auto text-xs py-1" type="date" value={dateFrom}
           onChange={(e) => { setDateFrom(e.target.value); setPage(1) }} title="From" />
         <input className="input w-auto text-xs py-1" type="date" value={dateTo}
@@ -155,7 +173,7 @@ export default function TradeLog() {
             <tr>
               {[
                 ['id', '#'], ['entry_time', 'Entry Time'], ['direction', 'Dir'],
-                ['pattern', 'Pattern'],
+                ['session', 'Session'], ['pattern', 'Pattern'],
                 ['entry_price', 'Entry'], ['stop', 'Stop'], ['target', 'Target'],
                 ['exit_price', 'Exit'], ['pnl', 'P&L $'], ['pnl_pct', 'P&L %'], ['result', 'Result'],
               ].map(([k, label]) => (
@@ -184,6 +202,7 @@ export default function TradeLog() {
                   <td className="px-2 py-1.5 uppercase">
                     <span className={t.direction === 'long' ? 'text-good' : 'text-bad'}>{t.direction}</span>
                   </td>
+                  <td className="px-2 py-1.5 text-gray-300 text-[11px]">{t.session || '—'}</td>
                   <td className="px-2 py-1.5 text-gray-300 text-[11px]">{t.pattern || '—'}</td>
                   <td className="px-2 py-1.5 font-mono">{t.entry_price?.toFixed(5)}</td>
                   <td className="px-2 py-1.5 font-mono">{t.stop?.toFixed(5)}</td>
@@ -204,7 +223,7 @@ export default function TradeLog() {
               )
             })}
             {!view.length && (
-              <tr><td colSpan={12} className="px-2 py-6 text-center text-gray-500">No trades match the filters.</td></tr>
+              <tr><td colSpan={13} className="px-2 py-6 text-center text-gray-500">No trades match the filters.</td></tr>
             )}
           </tbody>
           {summary && (
@@ -216,7 +235,7 @@ export default function TradeLog() {
                 <td className="px-2 py-2 text-gray-400">
                   {summary.wins}W / {summary.losses}L
                 </td>
-                <td className="px-2 py-2 text-gray-400" colSpan={4}>
+                <td className="px-2 py-2 text-gray-400" colSpan={5}>
                   Win rate <span className="text-gray-100">{fmtPct(summary.win_rate, 1)}</span>
                 </td>
                 <td className="px-2 py-2 text-gray-400">

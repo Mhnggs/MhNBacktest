@@ -241,31 +241,73 @@ export default function ParameterPanel() {
         </Field>
       </Section>
 
-      <Section title="Sessions">
+      <Section title="NY Session">
         <div className="grid grid-cols-2 gap-2">
-          <Field label="S1 Start">
+          <Field label="Morning Start">
             <input className="input" type="time" value={params.session_start} onChange={(e) => setParam('session_start', e.target.value)} />
           </Field>
-          <Field label="S1 End">
+          <Field label="Morning End">
             <input className="input" type="time" value={params.session_end} onChange={(e) => setParam('session_end', e.target.value)} />
           </Field>
         </div>
-        <Toggle label="Use Session 2" value={params.use_session_2} onChange={(v) => setParam('use_session_2', v)} />
+        <Toggle label="Use Afternoon Window" value={params.use_session_2} onChange={(v) => setParam('use_session_2', v)} />
         {params.use_session_2 && (
           <div className="grid grid-cols-2 gap-2">
-            <Field label="S2 Start">
+            <Field label="Afternoon Start">
               <input className="input" type="time" value={params.session_2_start} onChange={(e) => setParam('session_2_start', e.target.value)} />
             </Field>
-            <Field label="S2 End">
+            <Field label="Afternoon End">
               <input className="input" type="time" value={params.session_2_end} onChange={(e) => setParam('session_2_end', e.target.value)} />
             </Field>
           </div>
         )}
-        <Field label="Timezone">
+        <Field label="NY Timezone">
           <select className="input" value={params.timezone} onChange={(e) => setParam('timezone', e.target.value)}>
             {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
           </select>
         </Field>
+      </Section>
+
+      <Section title="London Session">
+        <Toggle label="Enable London" value={params.use_london} onChange={(v) => setParam('use_london', v)} />
+        {params.use_london && (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Start">
+                <input className="input" type="time" value={params.london_start} onChange={(e) => setParam('london_start', e.target.value)} />
+              </Field>
+              <Field label="End">
+                <input className="input" type="time" value={params.london_end} onChange={(e) => setParam('london_end', e.target.value)} />
+              </Field>
+            </div>
+            <Field label="London Timezone">
+              <select className="input" value={params.london_tz} onChange={(e) => setParam('london_tz', e.target.value)}>
+                {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
+              </select>
+            </Field>
+          </>
+        )}
+      </Section>
+
+      <Section title="Asian Session">
+        <Toggle label="Enable Asian" value={params.use_asian} onChange={(v) => setParam('use_asian', v)} />
+        {params.use_asian && (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Start">
+                <input className="input" type="time" value={params.asian_start} onChange={(e) => setParam('asian_start', e.target.value)} />
+              </Field>
+              <Field label="End">
+                <input className="input" type="time" value={params.asian_end} onChange={(e) => setParam('asian_end', e.target.value)} />
+              </Field>
+            </div>
+            <Field label="Asian Timezone">
+              <select className="input" value={params.asian_tz} onChange={(e) => setParam('asian_tz', e.target.value)}>
+                {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
+              </select>
+            </Field>
+          </>
+        )}
       </Section>
 
       <Section title="Day Filter">

@@ -39,13 +39,25 @@ class StrategyParams:
     risk_per_trade_pct: float = 1.0
     max_trades_per_day: int = 3
 
-    # Session window
+    # NY session (supports a morning + afternoon window)
     session_start: str = "09:45"
     session_end: str = "11:30"
     session_2_start: str = "13:30"
     session_2_end: str = "15:00"
     use_session_2: bool = True
     timezone: str = "America/New_York"
+
+    # London session
+    use_london: bool = False
+    london_start: str = "08:00"
+    london_end: str = "11:00"
+    london_tz: str = "Europe/London"
+
+    # Asian session
+    use_asian: bool = False
+    asian_start: str = "09:00"
+    asian_end: str = "12:00"
+    asian_tz: str = "Asia/Tokyo"
 
     # Day filter (0 = Mon … 4 = Fri)
     allowed_days: tuple = (0, 1, 2, 3, 4)
@@ -62,6 +74,7 @@ class Trade:
     risk_per_unit: float
     units: float
     pattern: str = ""
+    session: str = ""
     exit_time: Optional[pd.Timestamp] = None
     exit_price: Optional[float] = None
     pnl: float = 0.0
@@ -81,28 +94,54 @@ def _parse_time(s: str) -> dtime:
     return dtime(int(h), int(m))
 
 
-def _within_session(ts: pd.Timestamp, params: StrategyParams) -> bool:
-    tz = pytz.timezone(params.timezone)
-    local = ts.tz_convert(tz) if ts.tzinfo else tz.localize(ts.to_pydatetime())
-    t = local.time()
-    if _parse_time(params.session_start) <= t <= _parse_time(params.session_end):
-        return True
+def _session_windows(params: StrategyParams) -> list[tuple[str, str, str, str]]:
+    """Return (label, start_hhmm, end_hhmm, tz_name) for every enabled window.
+
+    NY morning is always on. NY afternoon, London, and Asian are each gated
+    by their enable flag.
+    """
+    windows: list[tuple[str, str, str, str]] = [
+        ("NY", params.session_start, params.session_end, params.timezone),
+    ]
     if params.use_session_2:
-        if _parse_time(params.session_2_start) <= t <= _parse_time(params.session_2_end):
-            return True
-    return False
+        windows.append(
+            ("NY", params.session_2_start, params.session_2_end, params.timezone),
+        )
+    if params.use_london:
+        windows.append(
+            ("London", params.london_start, params.london_end, params.london_tz),
+        )
+    if params.use_asian:
+        windows.append(
+            ("Asian", params.asian_start, params.asian_end, params.asian_tz),
+        )
+    return windows
 
 
-def _session_end_today(ts: pd.Timestamp, params: StrategyParams) -> pd.Timestamp:
-    tz = pytz.timezone(params.timezone)
+def _active_window(ts: pd.Timestamp, params: StrategyParams):
+    """Return (label, end_hhmm, tz_name) for the first window containing ``ts``.
+
+    NY is checked first, then London, then Asian — so overlaps favour the
+    market the user is centred on.
+    """
+    for label, start, end, tz_name in _session_windows(params):
+        tz = pytz.timezone(tz_name)
+        local = ts.tz_convert(tz) if ts.tzinfo else tz.localize(ts.to_pydatetime())
+        t = local.time()
+        if _parse_time(start) <= t <= _parse_time(end):
+            return label, end, tz_name
+    return None
+
+
+def _session_end_ts(ts: pd.Timestamp, end_hhmm: str, tz_name: str) -> pd.Timestamp:
+    """Timestamp for the end of the given session window on the local date of ``ts``."""
+    tz = pytz.timezone(tz_name)
     local = ts.tz_convert(tz) if ts.tzinfo else tz.localize(ts.to_pydatetime())
-    end_str = params.session_2_end if params.use_session_2 else params.session_end
-    eh, em = end_str.split(":")
+    eh, em = end_hhmm.split(":")
     end_local = local.replace(hour=int(eh), minute=int(em), second=0, microsecond=0)
-    return (
-        pd.Timestamp(end_local).tz_convert("UTC")
-        if ts.tzinfo else pd.Timestamp(end_local.replace(tzinfo=None))
-    )
+    if ts.tzinfo:
+        return pd.Timestamp(end_local).tz_convert("UTC")
+    return pd.Timestamp(end_local.replace(tzinfo=None))
 
 
 def _resolve_pattern_columns(allowed_keys: tuple) -> tuple[list[str], list[str]]:
@@ -149,7 +188,12 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     local_ts = work["datetime"].dt.tz_convert(tz)
     work["_session_date"] = local_ts.dt.date
     work["_local_dow"] = local_ts.dt.dayofweek
-    work["_in_session"] = work["datetime"].apply(lambda ts: _within_session(ts, params))
+
+    # Resolve session membership per bar.
+    active = work["datetime"].apply(lambda ts: _active_window(ts, params))
+    work["_session_label"] = active.apply(lambda a: a[0] if a else None)
+    work["_session_end_hhmm"] = active.apply(lambda a: a[1] if a else None)
+    work["_session_tz"] = active.apply(lambda a: a[2] if a else None)
 
     allowed_days = {int(d) for d in params.allowed_days}
     bull_cols, bear_cols = _resolve_pattern_columns(tuple(params.allowed_patterns))
@@ -158,6 +202,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     equity = params.starting_capital
     equity_curve: list[dict] = []
     open_trade: Optional[Trade] = None
+    open_trade_end_ts: Optional[pd.Timestamp] = None
     daily_count: dict = {}
     next_id = 1
     stop_distance = float(params.stop_loss_pips) * float(params.pip_size)
@@ -174,8 +219,10 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         "long_signals": 0,
         "short_signals": 0,
         "pattern_counts": {},
+        "session_counts": {},
         "allowed_days": list(params.allowed_days),
         "allowed_patterns": list(params.allowed_patterns),
+        "enabled_sessions": [label for label, *_ in _session_windows(params)],
     }
 
     rows = work.to_dict("records")
@@ -186,6 +233,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         prev = rows[i - 1]
         ts = bar["datetime"]
         session_date = bar["_session_date"]
+        session_label = bar["_session_label"]
 
         # ---- Manage open trade first ----
         if open_trade is not None:
@@ -216,22 +264,21 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
                     t.pnl = (t.entry_price - t.target) * t.units
                     t.result = "win"
 
-            if t.exit_time is None:
-                end_today = _session_end_today(ts, params)
-                if ts >= end_today:
-                    if t.direction == "long":
-                        t.pnl = (close - t.entry_price) * t.units
-                    else:
-                        t.pnl = (t.entry_price - close) * t.units
-                    t.exit_price = close
-                    t.exit_time = ts
-                    t.result = "timeout"
+            if t.exit_time is None and open_trade_end_ts is not None and ts >= open_trade_end_ts:
+                if t.direction == "long":
+                    t.pnl = (close - t.entry_price) * t.units
+                else:
+                    t.pnl = (t.entry_price - close) * t.units
+                t.exit_price = close
+                t.exit_time = ts
+                t.result = "timeout"
 
             if t.exit_time is not None:
                 t.pnl_pct = (t.pnl / params.starting_capital) * 100
                 equity += t.pnl
                 trades.append(t)
                 open_trade = None
+                open_trade_end_ts = None
 
         equity_curve.append({"datetime": ts.isoformat(), "equity": equity})
 
@@ -240,7 +287,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         if open_trade is not None:
             diag["rejected_open_trade"] += 1
             continue
-        if not bar["_in_session"]:
+        if session_label is None or (isinstance(session_label, float) and pd.isna(session_label)):
             continue
         diag["in_session_bars"] += 1
         if int(bar["_local_dow"]) not in allowed_days:
@@ -275,11 +322,13 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             units = risk_dollars / stop_distance
             diag["long_signals"] += 1
             diag["pattern_counts"][pattern] = diag["pattern_counts"].get(pattern, 0) + 1
+            diag["session_counts"][session_label] = diag["session_counts"].get(session_label, 0) + 1
             open_trade = Trade(
                 id=next_id, direction="long", entry_time=ts, entry_price=entry,
                 stop=stop, target=target, risk_per_unit=stop_distance,
-                units=units, pattern=pattern,
+                units=units, pattern=pattern, session=session_label,
             )
+            open_trade_end_ts = _session_end_ts(ts, bar["_session_end_hhmm"], bar["_session_tz"])
             next_id += 1
             daily_count[session_date] = daily_count.get(session_date, 0) + 1
 
@@ -298,11 +347,13 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             units = risk_dollars / stop_distance
             diag["short_signals"] += 1
             diag["pattern_counts"][pattern] = diag["pattern_counts"].get(pattern, 0) + 1
+            diag["session_counts"][session_label] = diag["session_counts"].get(session_label, 0) + 1
             open_trade = Trade(
                 id=next_id, direction="short", entry_time=ts, entry_price=entry,
                 stop=stop, target=target, risk_per_unit=stop_distance,
-                units=units, pattern=pattern,
+                units=units, pattern=pattern, session=session_label,
             )
+            open_trade_end_ts = _session_end_ts(ts, bar["_session_end_hhmm"], bar["_session_tz"])
             next_id += 1
             daily_count[session_date] = daily_count.get(session_date, 0) + 1
 

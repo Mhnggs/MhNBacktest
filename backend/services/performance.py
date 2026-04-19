@@ -150,6 +150,40 @@ def dow_breakdown(trades: list[dict]) -> list[dict]:
     return grouped.to_dict("records")
 
 
+_SESSION_ORDER = {"NY": 0, "London": 1, "Asian": 2}
+
+
+def session_breakdown(trades: list[dict]) -> list[dict]:
+    """Per-session win/loss/PF/PnL row per session label present in the trade log."""
+    if not trades:
+        return []
+    df = pd.DataFrame(trades)
+    if "session" not in df.columns:
+        return []
+    df["pnl"] = df["pnl"].astype(float)
+    rows: list[dict] = []
+    for name, group in df.groupby(df["session"].fillna("—")):
+        wins_mask = group["pnl"] > 0
+        losses_mask = group["pnl"] < 0
+        gross_profit = float(group.loc[wins_mask, "pnl"].sum())
+        gross_loss = float(-group.loc[losses_mask, "pnl"].sum())
+        n = int(len(group))
+        rows.append({
+            "session": str(name),
+            "trades": n,
+            "wins": int(wins_mask.sum()),
+            "losses": int(losses_mask.sum()),
+            "win_rate": (float(wins_mask.sum()) / n * 100.0) if n else 0.0,
+            "pnl": float(group["pnl"].sum()),
+            "avg_pnl": float(group["pnl"].mean()) if n else 0.0,
+            "best": float(group["pnl"].max()) if n else 0.0,
+            "worst": float(group["pnl"].min()) if n else 0.0,
+            "profit_factor": _safe_div(gross_profit, gross_loss),
+        })
+    rows.sort(key=lambda r: (_SESSION_ORDER.get(r["session"], 99), r["session"]))
+    return rows
+
+
 def hourly_breakdown(trades: list[dict], timezone: str = "UTC") -> list[dict]:
     """Group trades by entry hour in the given timezone.
 

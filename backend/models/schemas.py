@@ -28,13 +28,25 @@ class StrategyParamsSchema(BaseModel):
     risk_per_trade_pct: float = Field(1.0, gt=0.0, le=100.0)
     max_trades_per_day: int = Field(3, ge=1, le=50)
 
-    # Session
+    # Session (NY — supports a morning + afternoon window)
     session_start: str = "09:45"
     session_end: str = "11:30"
     session_2_start: str = "13:30"
     session_2_end: str = "15:00"
     use_session_2: bool = True
     timezone: str = "America/New_York"
+
+    # London session
+    use_london: bool = False
+    london_start: str = "08:00"
+    london_end: str = "11:00"
+    london_tz: str = "Europe/London"
+
+    # Asian session (Tokyo by default)
+    use_asian: bool = False
+    asian_start: str = "09:00"
+    asian_end: str = "12:00"
+    asian_tz: str = "Asia/Tokyo"
 
     # Day filter
     allowed_days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])

@@ -16,6 +16,14 @@ export const defaultParams = {
   session_2_end: '15:00',
   use_session_2: true,
   timezone: 'America/New_York',
+  use_london: false,
+  london_start: '08:00',
+  london_end: '11:00',
+  london_tz: 'Europe/London',
+  use_asian: false,
+  asian_start: '09:00',
+  asian_end: '12:00',
+  asian_tz: 'Asia/Tokyo',
   allowed_days: [0, 1, 2, 3, 4],
 }
 
