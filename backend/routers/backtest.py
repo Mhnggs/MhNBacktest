@@ -50,13 +50,28 @@ def run(req: BacktestRequest):
         .to_dict("records")
     )
 
+    def _to_hour(s: str) -> float:
+        h, m = s.split(":")
+        return int(h) + int(m) / 60.0
+
+    session_markers = [
+        {"label": "S1 start", "hour": _to_hour(params.session_start)},
+        {"label": "S1 end", "hour": _to_hour(params.session_end)},
+    ]
+    if params.use_session_2:
+        session_markers += [
+            {"label": "S2 start", "hour": _to_hour(params.session_2_start)},
+            {"label": "S2 end", "hour": _to_hour(params.session_2_end)},
+        ]
+
     return {
         "trades": result["trades"],
         "equity_curve": result["equity_curve"],
         "stats": stats,
         "monthly_breakdown": monthly_breakdown(result["trades"]),
         "dow_breakdown": dow_breakdown(result["trades"]),
-        "hourly_breakdown": hourly_breakdown(result["trades"]),
+        "hourly_breakdown": hourly_breakdown(result["trades"], params.timezone),
+        "session_markers": session_markers,
         "candles": candles,
         "diagnostics": result.get("diagnostics", {}),
     }

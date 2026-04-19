@@ -150,15 +150,27 @@ def dow_breakdown(trades: list[dict]) -> list[dict]:
     return grouped.to_dict("records")
 
 
-def hourly_breakdown(trades: list[dict]) -> list[dict]:
+def hourly_breakdown(trades: list[dict], timezone: str = "UTC") -> list[dict]:
+    """Group trades by entry hour in the given timezone.
+
+    Returns one row per hour 0..23 that saw at least one trade, with
+    total/win/loss counts, win_rate %, total P&L, and avg P&L per trade.
+    """
     if not trades:
         return []
     df = pd.DataFrame(trades)
-    df["entry_time"] = pd.to_datetime(df["entry_time"])
-    df["hour"] = df["entry_time"].dt.hour
+    df["entry_time"] = pd.to_datetime(df["entry_time"], utc=True)
+    try:
+        local = df["entry_time"].dt.tz_convert(timezone)
+    except Exception:
+        local = df["entry_time"]
+    df["hour"] = local.dt.hour
     grouped = df.groupby("hour").agg(
         pnl=("pnl", "sum"),
         trades=("pnl", "count"),
         wins=("pnl", lambda s: int((s > 0).sum())),
+        avg_pnl=("pnl", "mean"),
     ).reset_index()
+    grouped["losses"] = grouped["trades"] - grouped["wins"]
+    grouped["win_rate"] = (grouped["wins"] / grouped["trades"] * 100).round(1)
     return grouped.to_dict("records")
