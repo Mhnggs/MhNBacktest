@@ -1,19 +1,19 @@
-"""DR / IDR breakout-retest strategy.
+"""RSI Exhaustion Mean Reversion Strategy.
 
-Core edge: after the 09:30-10:30 NY "Defining Range" is set, the first
-clean break of that range most often does *not* reverse to take out the
-opposite side the same day. We enter on a retest of the broken level
-(or fall back to a midpoint retest) with confirmation, risk fixed by the
-stop-buffer beyond the DR level, targets expressed as multiples of the
-DR range itself.
+Core edge: when RSI(2) reaches an extreme value AT a well-known structure
+level (previous-day high/low, VWAP bands, round numbers, London high/low,
+daily/weekly open), price tends to mean-revert. The combination of
+oscillator extreme + structure produces the edge; either alone is weak.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
-from datetime import time as dtime, date
+from datetime import date
 from typing import Optional
 
+import math
+import numpy as np
 import pandas as pd
 import pytz
 
@@ -21,14 +21,6 @@ from .indicators import build_indicator_frame
 from .news_calendar import classify_news_day, parse_custom_skip_dates
 
 
-# Directional-bias validation is measured from the breakout bar up to this NY
-# local time, with a small tolerance: any candle wick that comes within
-# BIAS_TOUCH_TOLERANCE_PIPS of the opposite DR level counts as "taken".
-BIAS_SESSION_END_LOCAL = "16:00"
-BIAS_TOUCH_TOLERANCE_PIPS = 2.0
-
-
-# Confirmation pattern group → (bullish column, bearish column).
 CONFIRMATION_PATTERN_COLS: dict[str, tuple[str, str]] = {
     "engulfing": ("bullish_engulfing", "bearish_engulfing"),
     "marubozu": ("bullish_marubozu", "bearish_marubozu"),
@@ -36,6 +28,26 @@ CONFIRMATION_PATTERN_COLS: dict[str, tuple[str, str]] = {
     "inside_bar": ("inside_bar_bull", "inside_bar_bear"),
     "piercing_cloud": ("piercing_line", "dark_cloud_cover"),
     "doji": ("doji", "doji"),
+}
+
+
+# Level type keys used for diagnostics and the level-performance breakdown.
+LEVEL_TYPES = [
+    "prev_day_high", "prev_day_low", "prev_day_close", "prev_day_open",
+    "vwap", "vwap_upper_1", "vwap_upper_2", "vwap_lower_1", "vwap_lower_2",
+    "round_number", "london_high", "london_low",
+    "daily_open", "weekly_open",
+]
+
+SUPPORT_LEVEL_TYPES = {
+    "prev_day_low", "vwap_lower_1", "vwap_lower_2",
+    "round_number", "london_low", "daily_open", "weekly_open",
+    "vwap", "prev_day_close", "prev_day_open",
+}
+RESISTANCE_LEVEL_TYPES = {
+    "prev_day_high", "vwap_upper_1", "vwap_upper_2",
+    "round_number", "london_high", "daily_open", "weekly_open",
+    "vwap", "prev_day_close", "prev_day_open",
 }
 
 
@@ -48,37 +60,58 @@ class StrategyParams:
     starting_capital: float = 10_000.0
     risk_per_trade_pct: float = 1.0
 
-    # DR window
-    dr_start_time: str = "09:30"
-    dr_end_time: str = "10:30"
-    dr_timezone: str = "America/New_York"
-    min_dr_range_pips: float = 15.0
-    max_dr_range_pips: float = 70.0
+    # RSI settings
+    rsi_period: int = 2
+    rsi_medium_period: int = 3
+    rsi_slow_period: int = 14
+    rsi_oversold: float = 10.0
+    rsi_overbought: float = 90.0
+    rsi_exit_level: float = 50.0
+    use_rsi_exit: bool = True
 
-    # Entry
-    entry_type: str = "retest_then_midpoint"  # retest_only | midpoint_only | retest_then_midpoint
-    retest_tolerance_pips: float = 5.0
-    require_confirmation_candle: bool = True
+    # Structure level toggles
+    use_prev_day_high_low: bool = True
+    use_prev_day_open_close: bool = False
+    use_vwap: bool = True
+    use_vwap_bands: bool = True
+    use_round_numbers: bool = True
+    use_london_levels: bool = True
+    use_daily_open: bool = True
+    use_weekly_open: bool = False
+    level_tolerance_pips: float = 5.0
+    require_level_confluence: bool = False
+    round_number_grid_pips: float = 50.0
+
+    # Trend filter
+    use_trend_filter: bool = True
+    trend_filter_type: str = "bb_width"  # "bb_width" | "adx" | "both"
+    bb_width_max: float = 0.0015
+    adx_max: float = 25.0
+
+    # Session filter (times interpreted in Europe/London)
+    session_timezone: str = "Europe/London"
+    avoid_session_opens: bool = True
+    use_asian_session: bool = True     # 00:00-07:00 London
+    use_london_mid: bool = True        # 09:00-12:00 London
+    use_ny_mid: bool = True            # 15:00-17:00 London
+
+    # Confirmation
+    require_confirmation_candle: bool = False
     confirmation_patterns: tuple = ("marubozu", "engulfing")
 
-    # Time limits
-    retest_window_minutes: int = 90
-    last_entry_time: str = "13:00"
-
-    # Risk / exits
-    stop_buffer_pips: float = 3.0
-    use_partial_tp: bool = True
-    partial_tp_1_mult: float = 0.5
-    partial_tp_2_mult: float = 1.0
-    partial_tp_pct: float = 50.0
-    move_be_after_t1: bool = True
-    max_trades_per_day: int = 1
+    # Risk & exit
+    stop_pips: float = 8.0
+    use_fixed_target: bool = True
+    fixed_target_pips: float = 15.0
+    rr_ratio: float = 1.5  # used if use_fixed_target is False and no nearest-opposite-level
+    max_trade_duration_minutes: int = 120
+    max_trades_per_day: int = 4
 
     # News filter
     enable_news_filter: bool = True
     custom_skip_dates: tuple = ()
 
-    # Day filter
+    # Day filter (0 = Mon … 4 = Fri)
     allowed_days: tuple = (0, 1, 2, 3, 4)
 
 
@@ -89,62 +122,41 @@ class Trade:
     entry_time: pd.Timestamp
     entry_price: float
     stop: float
-    target1: float
-    target2: float
+    target: float
     risk_per_unit: float
     units: float
-    dr_high: float
-    dr_low: float
-    dr_range: float
-    dr_range_pips: float
-    entry_type_used: str
+    level_type: str
+    level_price: float
+    rsi_at_entry: float
+    bb_width_at_entry: float
     pattern: str = ""
     exit_time: Optional[pd.Timestamp] = None
     exit_price: Optional[float] = None
+    exit_reason: str = ""     # "stop" | "target" | "rsi" | "time" | "eod"
     pnl: float = 0.0
     pnl_pct: float = 0.0
     result: str = "open"
     bars_held: int = 0
-    breakeven_moved: bool = False
-    partial_taken: bool = False
-    partial_pnl: float = 0.0
-    partial_exit_time: Optional[pd.Timestamp] = None
-    partial_exit_price: Optional[float] = None
+    mfe_pips: float = 0.0   # max favorable excursion in pips
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["entry_time"] = self.entry_time.isoformat()
         d["exit_time"] = self.exit_time.isoformat() if self.exit_time is not None else None
-        d["partial_exit_time"] = (
-            self.partial_exit_time.isoformat() if self.partial_exit_time is not None else None
-        )
         return d
 
 
 @dataclass
 class _DayState:
     day: date
-    dr_high: float
-    dr_low: float
-    dr_range: float
-    dr_midpoint: float
-    valid: bool = True
-    skip_reason: str = ""
-    breakout_direction: Optional[str] = None  # "bull" or "bear"
-    breakout_time: Optional[pd.Timestamp] = None
-    breakout_price: Optional[float] = None
-    retest_deadline: Optional[pd.Timestamp] = None
-    last_entry_deadline: Optional[pd.Timestamp] = None
-    bias_deadline: Optional[pd.Timestamp] = None  # 16:00 NY — cutoff for opposite-side tracking
-    traded: bool = False
-    dr_high_taken_after_break: bool = False
-    dr_low_taken_after_break: bool = False
-    opposite_touch_time: Optional[pd.Timestamp] = None
+    trades_taken: int = 0
 
 
-def _parse_time(s: str) -> dtime:
-    h, m = s.split(":")
-    return dtime(int(h), int(m))
+def _match_pattern(bar: dict, columns: list[str]) -> Optional[str]:
+    for col in columns:
+        if bar.get(col):
+            return col
+    return None
 
 
 def _resolve_confirmation_cols(keys: tuple) -> tuple[list[str], list[str]]:
@@ -157,35 +169,107 @@ def _resolve_confirmation_cols(keys: tuple) -> tuple[list[str], list[str]]:
     return bull, bear
 
 
-def _match_pattern(bar: dict, columns: list[str]) -> Optional[str]:
-    for col in columns:
-        if bar.get(col):
-            return col
-    return None
+def _in_avoided_open(hhmm: float) -> bool:
+    """First 30 min of London (08:00-08:30) or NY (13:30-14:00) in London-time."""
+    return (8.0 <= hhmm < 8.5) or (13.5 <= hhmm < 14.0)
 
 
-def _local_time(ts: pd.Timestamp, tz_name: str) -> dtime:
-    local = ts.tz_convert(pytz.timezone(tz_name)) if ts.tzinfo else ts
-    return local.time()
+def _session_allowed(hhmm: float, p: StrategyParams) -> bool:
+    if p.avoid_session_opens and _in_avoided_open(hhmm):
+        return False
+    asian = 0.0 <= hhmm < 7.0
+    london_mid = 9.0 <= hhmm < 12.0
+    ny_mid = 15.0 <= hhmm < 17.0
+    if asian and p.use_asian_session:
+        return True
+    if london_mid and p.use_london_mid:
+        return True
+    if ny_mid and p.use_ny_mid:
+        return True
+    return False
 
 
-def _deadline_ts(ts: pd.Timestamp, hhmm: str, tz_name: str) -> pd.Timestamp:
-    tz = pytz.timezone(tz_name)
-    local = ts.tz_convert(tz) if ts.tzinfo else tz.localize(ts.to_pydatetime())
-    h, m = hhmm.split(":")
-    end_local = local.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
-    if ts.tzinfo:
-        return pd.Timestamp(end_local).tz_convert("UTC")
-    return pd.Timestamp(end_local.replace(tzinfo=None))
+def _collect_candidate_levels(bar: dict, p: StrategyParams) -> list[tuple[str, float]]:
+    """Gather every enabled structure level price for this bar."""
+    lvls: list[tuple[str, float]] = []
+    def _add(name: str, val):
+        if val is None:
+            return
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            return
+        if math.isnan(f):
+            return
+        lvls.append((name, f))
+
+    if p.use_prev_day_high_low:
+        _add("prev_day_high", bar.get("prev_day_high"))
+        _add("prev_day_low", bar.get("prev_day_low"))
+    if p.use_prev_day_open_close:
+        _add("prev_day_open", bar.get("prev_day_open"))
+        _add("prev_day_close", bar.get("prev_day_close"))
+    if p.use_vwap:
+        _add("vwap", bar.get("vwap"))
+    if p.use_vwap_bands:
+        _add("vwap_upper_1", bar.get("vwap_upper_1"))
+        _add("vwap_upper_2", bar.get("vwap_upper_2"))
+        _add("vwap_lower_1", bar.get("vwap_lower_1"))
+        _add("vwap_lower_2", bar.get("vwap_lower_2"))
+    if p.use_london_levels:
+        _add("london_high", bar.get("london_high"))
+        _add("london_low", bar.get("london_low"))
+    if p.use_daily_open:
+        _add("daily_open", bar.get("daily_open"))
+    if p.use_weekly_open:
+        _add("weekly_open", bar.get("weekly_open"))
+    if p.use_round_numbers:
+        close = float(bar["close"])
+        grid = p.round_number_grid_pips * p.pip_size
+        if grid > 0:
+            lower = math.floor(close / grid) * grid
+            upper = lower + grid
+            _add("round_number", round(lower, 10))
+            _add("round_number", round(upper, 10))
+    return lvls
 
 
-def _force_close(t: Trade, price: float, ts: pd.Timestamp, result: str):
+def _nearest_level_on_side(
+    close: float,
+    levels: list[tuple[str, float]],
+    side: str,  # "support" (below/near price) or "resistance" (above/near price)
+    tolerance: float,
+) -> Optional[tuple[str, float, float]]:
+    """Return (name, price, distance) of nearest valid level within tolerance."""
+    allowed = SUPPORT_LEVEL_TYPES if side == "support" else RESISTANCE_LEVEL_TYPES
+    best = None
+    for name, price in levels:
+        if name not in allowed:
+            continue
+        if side == "support" and price > close + tolerance:
+            continue
+        if side == "resistance" and price < close - tolerance:
+            continue
+        d = abs(close - price)
+        if d > tolerance:
+            continue
+        if best is None or d < best[2]:
+            best = (name, price, d)
+    return best
+
+
+def _count_levels_within(close: float, levels: list[tuple[str, float]], tolerance: float) -> int:
+    return sum(1 for _, p in levels if abs(close - p) <= tolerance)
+
+
+def _force_close(t: Trade, price: float, ts: pd.Timestamp, reason: str, result: str):
     if t.direction == "long":
-        t.pnl = (price - t.entry_price) * t.units + t.partial_pnl
+        t.pnl = (price - t.entry_price) * t.units
     else:
-        t.pnl = (t.entry_price - price) * t.units + t.partial_pnl
+        t.pnl = (t.entry_price - price) * t.units
     t.exit_price = price
     t.exit_time = ts
+    t.exit_reason = reason
     t.result = result
 
 
@@ -208,25 +292,21 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
     work = build_indicator_frame(
         work,
-        dr_start=params.dr_start_time,
-        dr_end=params.dr_end_time,
-        dr_tz=params.dr_timezone,
+        rsi_fast=params.rsi_period,
+        rsi_medium=params.rsi_medium_period,
+        rsi_slow=params.rsi_slow_period,
     )
 
     pip_size = float(params.pip_size)
-    min_range = float(params.min_dr_range_pips) * pip_size
-    max_range = float(params.max_dr_range_pips) * pip_size
-    retest_tol = float(params.retest_tolerance_pips) * pip_size
-    stop_buffer = float(params.stop_buffer_pips) * pip_size
-    bias_tolerance = BIAS_TOUCH_TOLERANCE_PIPS * pip_size
-    partial_frac = float(params.partial_tp_pct) / 100.0
-    entry_type = params.entry_type
-    wants_retest = entry_type in ("retest_only", "retest_then_midpoint")
-    wants_midpoint = entry_type in ("midpoint_only", "retest_then_midpoint")
+    level_tol = float(params.level_tolerance_pips) * pip_size
+    stop_dist = float(params.stop_pips) * pip_size
+    fixed_target_dist = float(params.fixed_target_pips) * pip_size
+    max_dur = pd.Timedelta(minutes=int(params.max_trade_duration_minutes))
 
     bull_conf, bear_conf = _resolve_confirmation_cols(tuple(params.confirmation_patterns))
     allowed_days = {int(d) for d in params.allowed_days}
     custom_skip = parse_custom_skip_dates(list(params.custom_skip_dates))
+    session_tz = pytz.timezone(params.session_timezone)
 
     trades: list[Trade] = []
     equity = params.starting_capital
@@ -237,25 +317,19 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
     diag = {
         "total_bars": 0,
-        "post_dr_bars": 0,
-        "total_days_seen": 0,
-        "valid_dr_days": 0,
-        "days_skipped_narrow": 0,
-        "days_skipped_wide": 0,
-        "days_skipped_news": 0,
-        "days_skipped_day_of_week": 0,
-        "days_with_breakout": 0,
-        "bull_breakouts": 0,
-        "bear_breakouts": 0,
-        "entries_via_retest": 0,
-        "entries_via_midpoint": 0,
-        "days_no_entry": 0,
-        # Directional bias tracking
-        "bull_break_days_low_held": 0,
-        "bull_break_days_low_broken": 0,
-        "bear_break_days_high_held": 0,
-        "bear_break_days_high_broken": 0,
-        "breakout_to_retest_minutes": [],
+        "signals_raw": 0,
+        "skipped_trend_filter": 0,
+        "skipped_session": 0,
+        "skipped_no_level": 0,
+        "skipped_no_confluence": 0,
+        "skipped_no_confirmation": 0,
+        "skipped_news": 0,
+        "skipped_day_of_week": 0,
+        "skipped_open_trade": 0,
+        "skipped_max_trades_per_day": 0,
+        "entries": 0,
+        "long_entries": 0,
+        "short_entries": 0,
         "news_skips_by_type": {},
     }
 
@@ -264,268 +338,168 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
     for i in range(n):
         bar = rows[i]
-        ts = bar["datetime"]
+        ts: pd.Timestamp = bar["datetime"]
         diag["total_bars"] += 1
 
-        # Track day state as soon as we see a bar after the DR window ends.
-        day: date = bar["_dr_date"]
-
-        post_dr_flag = bool(bar.get("post_dr", False))
-        dr_high = bar.get("dr_high")
-        dr_low = bar.get("dr_low")
-        dr_range = bar.get("dr_range")
-
-        state = day_states.get(day)
-
-        # Day initialization — fires on the first post-DR bar for a new day.
-        if state is None and post_dr_flag and dr_high is not None and pd.notna(dr_high):
-            diag["total_days_seen"] += 1
-            state = _DayState(
-                day=day,
-                dr_high=float(dr_high),
-                dr_low=float(dr_low),
-                dr_range=float(dr_range),
-                dr_midpoint=(float(dr_high) + float(dr_low)) / 2.0,
-            )
-            state.last_entry_deadline = _deadline_ts(ts, params.last_entry_time, params.dr_timezone)
-            state.bias_deadline = _deadline_ts(ts, BIAS_SESSION_END_LOCAL, params.dr_timezone)
-
-            # Day-of-week filter (based on NY date).
-            dow = pd.Timestamp(state.day).weekday()
-            if dow not in allowed_days:
-                state.valid = False
-                state.skip_reason = "day_of_week"
-                diag["days_skipped_day_of_week"] += 1
-            # Range validity.
-            elif state.dr_range < min_range:
-                state.valid = False
-                state.skip_reason = "range_too_narrow"
-                diag["days_skipped_narrow"] += 1
-            elif state.dr_range > max_range:
-                state.valid = False
-                state.skip_reason = "range_too_wide"
-                diag["days_skipped_wide"] += 1
-            # News filter.
-            elif params.enable_news_filter:
-                label = classify_news_day(day)
-                if label is not None or day in custom_skip:
-                    state.valid = False
-                    state.skip_reason = f"news_{label or 'custom'}"
-                    diag["days_skipped_news"] += 1
-                    bucket = label or "custom"
-                    diag["news_skips_by_type"][bucket] = diag["news_skips_by_type"].get(bucket, 0) + 1
-
-            if state.valid:
-                diag["valid_dr_days"] += 1
-            day_states[day] = state
-
-        if post_dr_flag:
-            diag["post_dr_bars"] += 1
-
-        # ---- Directional-bias tracking ----
-        # Run on EVERY bar after breakout (independent of trade state), up to the
-        # NY 16:00 cutoff. A candle wick within BIAS_TOUCH_TOLERANCE_PIPS of the
-        # opposite DR level counts as "opposite side taken".
-        if (
-            state is not None
-            and state.breakout_direction is not None
-            and not state.dr_low_taken_after_break
-            and not state.dr_high_taken_after_break
-            and state.bias_deadline is not None
-            and ts <= state.bias_deadline
-            and state.breakout_time is not None
-            and ts > state.breakout_time
-        ):
-            if state.breakout_direction == "bull":
-                if bar["low"] <= state.dr_low + bias_tolerance:
-                    state.dr_low_taken_after_break = True
-                    state.opposite_touch_time = ts
-            else:
-                if bar["high"] >= state.dr_high - bias_tolerance:
-                    state.dr_high_taken_after_break = True
-                    state.opposite_touch_time = ts
-
-        # ---- Manage any open trade ----
+        # Manage any open trade BEFORE potentially opening a new one.
         if open_trade is not None:
-            open_trade.bars_held += 1
             t = open_trade
+            t.bars_held += 1
             high, low, close = bar["high"], bar["low"], bar["close"]
 
-            # Partial TP at target 1.
-            if params.use_partial_tp and not t.partial_taken:
-                if t.direction == "long":
-                    if high >= t.target1:
-                        closed_units = t.units * partial_frac
-                        t.partial_pnl = (t.target1 - t.entry_price) * closed_units
-                        t.partial_exit_price = t.target1
-                        t.partial_exit_time = ts
-                        t.units -= closed_units
-                        t.partial_taken = True
-                        if params.move_be_after_t1:
-                            t.stop = max(t.stop, t.entry_price)
-                            t.breakeven_moved = True
-                else:
-                    if low <= t.target1:
-                        closed_units = t.units * partial_frac
-                        t.partial_pnl = (t.entry_price - t.target1) * closed_units
-                        t.partial_exit_price = t.target1
-                        t.partial_exit_time = ts
-                        t.units -= closed_units
-                        t.partial_taken = True
-                        if params.move_be_after_t1:
-                            t.stop = min(t.stop, t.entry_price)
-                            t.breakeven_moved = True
-
-            # Full exit: stop or target 2.
+            # Track max favorable excursion.
             if t.direction == "long":
-                if low <= t.stop:
-                    result = "breakeven" if t.partial_taken and t.breakeven_moved else "loss"
-                    _force_close(t, t.stop, ts, result)
-                elif params.use_partial_tp and high >= t.target2:
-                    _force_close(t, t.target2, ts, "win")
-                elif not params.use_partial_tp and high >= t.target1:
-                    # Single-target mode collapses to target1.
-                    _force_close(t, t.target1, ts, "win")
+                mfe = (high - t.entry_price) / pip_size
             else:
-                if high >= t.stop:
-                    result = "breakeven" if t.partial_taken and t.breakeven_moved else "loss"
-                    _force_close(t, t.stop, ts, result)
-                elif params.use_partial_tp and low <= t.target2:
-                    _force_close(t, t.target2, ts, "win")
-                elif not params.use_partial_tp and low <= t.target1:
-                    _force_close(t, t.target1, ts, "win")
+                mfe = (t.entry_price - low) / pip_size
+            if mfe > t.mfe_pips:
+                t.mfe_pips = mfe
 
-            # Force close at last_entry_time (end of trading window).
-            if (
-                t.exit_time is None
-                and state is not None
-                and state.last_entry_deadline is not None
-                and ts >= state.last_entry_deadline
-            ):
-                _force_close(t, close, ts, "timeout")
+            # 1) Stop loss.
+            if t.direction == "long" and low <= t.stop:
+                _force_close(t, t.stop, ts, "stop", "loss")
+            elif t.direction == "short" and high >= t.stop:
+                _force_close(t, t.stop, ts, "stop", "loss")
+
+            # 2) Fixed target.
+            if t.exit_time is None:
+                if t.direction == "long" and high >= t.target:
+                    _force_close(t, t.target, ts, "target", "win")
+                elif t.direction == "short" and low <= t.target:
+                    _force_close(t, t.target, ts, "target", "win")
+
+            # 3) RSI exit — close if RSI has crossed back toward mid AND trade
+            # is in profit; otherwise hold through to stop/target/time.
+            if t.exit_time is None and params.use_rsi_exit:
+                rsi = bar.get("rsi_fast")
+                if rsi is not None and not (isinstance(rsi, float) and math.isnan(rsi)):
+                    if t.direction == "long" and rsi >= params.rsi_exit_level and close > t.entry_price:
+                        _force_close(t, close, ts, "rsi", "win")
+                    elif t.direction == "short" and rsi <= params.rsi_exit_level and close < t.entry_price:
+                        _force_close(t, close, ts, "rsi", "win")
+
+            # 4) Max duration.
+            if t.exit_time is None and (ts - t.entry_time) >= max_dur:
+                result = "win" if (
+                    (t.direction == "long" and close > t.entry_price)
+                    or (t.direction == "short" and close < t.entry_price)
+                ) else "loss"
+                _force_close(t, close, ts, "time", result)
 
             if t.exit_time is not None:
-                t.pnl_pct = (t.pnl / params.starting_capital) * 100
+                t.pnl_pct = (t.pnl / params.starting_capital) * 100.0
                 equity += t.pnl
                 trades.append(t)
                 open_trade = None
 
         equity_curve.append({"datetime": ts.isoformat(), "equity": equity})
 
-        # ---- Signal generation (only on post-DR bars for valid days) ----
-        if state is None or not state.valid or state.traded or open_trade is not None:
+        if open_trade is not None:
+            diag["skipped_open_trade"] += 1
             continue
 
-        if not post_dr_flag:
+        # ---- Signal evaluation ----
+
+        # RSI extreme check (cheap, first).
+        rsi_fast = bar.get("rsi_fast")
+        if rsi_fast is None or (isinstance(rsi_fast, float) and math.isnan(rsi_fast)):
+            continue
+        long_exhausted = rsi_fast < params.rsi_oversold
+        short_exhausted = rsi_fast > params.rsi_overbought
+        if not long_exhausted and not short_exhausted:
+            continue
+        diag["signals_raw"] += 1
+
+        # Day / session filters (use session timezone).
+        local_ts = ts.tz_convert(session_tz)
+        local_date = local_ts.date()
+        hhmm = local_ts.hour + local_ts.minute / 60.0
+
+        if local_date.weekday() not in allowed_days:
+            diag["skipped_day_of_week"] += 1
             continue
 
-        # Past last_entry_time — no new entries this day.
-        if state.last_entry_deadline is not None and ts >= state.last_entry_deadline:
+        # News filter.
+        if params.enable_news_filter:
+            label = classify_news_day(local_date)
+            if label is not None or local_date in custom_skip:
+                diag["skipped_news"] += 1
+                bucket = label or "custom"
+                diag["news_skips_by_type"][bucket] = diag["news_skips_by_type"].get(bucket, 0) + 1
+                continue
+
+        if not _session_allowed(hhmm, params):
+            diag["skipped_session"] += 1
             continue
 
-        close = bar["close"]
-        high = bar["high"]
-        low = bar["low"]
+        # Trend filter.
+        bb_w = bar.get("bb_width")
+        adx_v = bar.get("adx")
+        if params.use_trend_filter:
+            blocked = False
+            if params.trend_filter_type in ("bb_width", "both"):
+                if bb_w is not None and not (isinstance(bb_w, float) and math.isnan(bb_w)):
+                    if bb_w > params.bb_width_max:
+                        blocked = True
+            if params.trend_filter_type in ("adx", "both") and not blocked:
+                if adx_v is not None and not (isinstance(adx_v, float) and math.isnan(adx_v)):
+                    if adx_v > params.adx_max:
+                        blocked = True
+            if blocked:
+                diag["skipped_trend_filter"] += 1
+                continue
 
-        # --- Breakout detection ---
-        if state.breakout_direction is None:
-            # Need a prior bar that was inside or touching the DR. Use the
-            # previous post-DR bar for the inside-range check; if this is
-            # the very first post-DR bar, allow it.
-            prev = rows[i - 1] if i > 0 else None
-            prev_inside = True
-            if prev is not None and prev.get("post_dr"):
-                pc = prev["close"]
-                prev_inside = (pc <= state.dr_high) and (pc >= state.dr_low)
-
-            if close > state.dr_high and prev_inside:
-                state.breakout_direction = "bull"
-                state.breakout_time = ts
-                state.breakout_price = close
-                state.retest_deadline = ts + pd.Timedelta(minutes=params.retest_window_minutes)
-                diag["days_with_breakout"] += 1
-                diag["bull_breakouts"] += 1
-            elif close < state.dr_low and prev_inside:
-                state.breakout_direction = "bear"
-                state.breakout_time = ts
-                state.breakout_price = close
-                state.retest_deadline = ts + pd.Timedelta(minutes=params.retest_window_minutes)
-                diag["days_with_breakout"] += 1
-                diag["bear_breakouts"] += 1
-
-            # Never enter on the breakout bar itself — wait for retest/midpoint.
+        # Structure-level check.
+        close = float(bar["close"])
+        candidates = _collect_candidate_levels(bar, params)
+        side = "support" if long_exhausted else "resistance"
+        nearest = _nearest_level_on_side(close, candidates, side, level_tol)
+        if nearest is None:
+            diag["skipped_no_level"] += 1
+            continue
+        if params.require_level_confluence and _count_levels_within(close, candidates, level_tol) < 2:
+            diag["skipped_no_confluence"] += 1
             continue
 
-        # --- Entry logic (after breakout) ---
-        is_bull = state.breakout_direction == "bull"
-        retest_level = state.dr_high if is_bull else state.dr_low
-        within_retest_window = (
-            state.retest_deadline is not None and ts <= state.retest_deadline
-        )
+        # Per-day trade cap (keyed by session-local date).
+        state = day_states.get(local_date)
+        if state is None:
+            state = _DayState(day=local_date)
+            day_states[local_date] = state
+        if state.trades_taken >= int(params.max_trades_per_day):
+            diag["skipped_max_trades_per_day"] += 1
+            continue
 
-        entry_type_used = None
+        # Confirmation candle (optional).
         pattern = ""
+        if params.require_confirmation_candle:
+            cols = bull_conf if long_exhausted else bear_conf
+            pattern = _match_pattern(bar, cols) or ""
+            if not pattern:
+                diag["skipped_no_confirmation"] += 1
+                continue
 
-        # Primary: DR level retest.
-        if wants_retest and within_retest_window:
-            touched = (
-                (is_bull and low <= retest_level + retest_tol)
-                or (not is_bull and high >= retest_level - retest_tol)
+        # ---- Build the trade ----
+        direction = "long" if long_exhausted else "short"
+        entry_price = close
+        if direction == "long":
+            stop = entry_price - stop_dist
+            target = (
+                entry_price + fixed_target_dist
+                if params.use_fixed_target
+                else entry_price + stop_dist * float(params.rr_ratio)
             )
-            if touched:
-                if params.require_confirmation_candle:
-                    cols = bull_conf if is_bull else bear_conf
-                    pattern = _match_pattern(bar, cols) or ""
-                    if pattern:
-                        entry_type_used = "DR Retest"
-                else:
-                    entry_type_used = "DR Retest"
-
-        # Fallback: midpoint retest after window expires (or midpoint-only mode).
-        if entry_type_used is None and wants_midpoint:
-            midpoint_ok = (
-                state.retest_deadline is not None
-                and ts > state.retest_deadline
-                and entry_type == "retest_then_midpoint"
-            ) or entry_type == "midpoint_only"
-
-            if midpoint_ok:
-                mp = state.dr_midpoint
-                touched = (
-                    (is_bull and low <= mp + retest_tol and low >= state.dr_low)
-                    or (not is_bull and high >= mp - retest_tol and high <= state.dr_high)
-                )
-                if touched:
-                    if params.require_confirmation_candle:
-                        cols = bull_conf if is_bull else bear_conf
-                        pattern = _match_pattern(bar, cols) or ""
-                        if pattern:
-                            entry_type_used = "Midpoint Retest"
-                    else:
-                        entry_type_used = "Midpoint Retest"
-
-        if entry_type_used is None:
-            continue
-
-        # --- Build the trade ---
-        entry_price = float(close)
-        if is_bull:
-            stop = state.dr_high - stop_buffer
-            risk = entry_price - stop
-            if risk <= 0:
-                continue
-            t1 = entry_price + state.dr_range * float(params.partial_tp_1_mult)
-            t2 = entry_price + state.dr_range * float(params.partial_tp_2_mult)
-            direction = "long"
         else:
-            stop = state.dr_low + stop_buffer
-            risk = stop - entry_price
-            if risk <= 0:
-                continue
-            t1 = entry_price - state.dr_range * float(params.partial_tp_1_mult)
-            t2 = entry_price - state.dr_range * float(params.partial_tp_2_mult)
-            direction = "short"
+            stop = entry_price + stop_dist
+            target = (
+                entry_price - fixed_target_dist
+                if params.use_fixed_target
+                else entry_price - stop_dist * float(params.rr_ratio)
+            )
 
+        risk = abs(entry_price - stop)
+        if risk <= 0:
+            continue
         risk_dollars = equity * (params.risk_per_trade_pct / 100.0)
         units = risk_dollars / risk
 
@@ -535,85 +509,32 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             entry_time=ts,
             entry_price=entry_price,
             stop=stop,
-            target1=t1,
-            target2=t2,
+            target=target,
             risk_per_unit=risk,
             units=units,
-            dr_high=state.dr_high,
-            dr_low=state.dr_low,
-            dr_range=state.dr_range,
-            dr_range_pips=state.dr_range / pip_size,
-            entry_type_used=entry_type_used,
+            level_type=nearest[0],
+            level_price=nearest[1],
+            rsi_at_entry=float(rsi_fast),
+            bb_width_at_entry=float(bb_w) if bb_w is not None and not (isinstance(bb_w, float) and math.isnan(bb_w)) else 0.0,
             pattern=pattern,
         )
         next_id += 1
-        state.traded = True
-
-        if entry_type_used == "DR Retest":
-            diag["entries_via_retest"] += 1
+        state.trades_taken += 1
+        diag["entries"] += 1
+        if direction == "long":
+            diag["long_entries"] += 1
         else:
-            diag["entries_via_midpoint"] += 1
-        if state.breakout_time is not None:
-            mins = (ts - state.breakout_time).total_seconds() / 60.0
-            diag["breakout_to_retest_minutes"].append(mins)
+            diag["short_entries"] += 1
 
     # Close any trade left open at the end of data.
     if open_trade is not None and rows:
         last = rows[-1]
-        _force_close(open_trade, last["close"], last["datetime"], "timeout")
-        open_trade.pnl_pct = (open_trade.pnl / params.starting_capital) * 100
+        _force_close(open_trade, last["close"], last["datetime"], "eod", "breakeven")
+        open_trade.pnl_pct = (open_trade.pnl / params.starting_capital) * 100.0
         equity += open_trade.pnl
         trades.append(open_trade)
 
-    # Tally per-day directional bias and no-entry days.
-    for st in day_states.values():
-        if not st.valid:
-            continue
-        if st.breakout_direction is None:
-            diag["days_no_entry"] += 1
-            continue
-        if not st.traded:
-            diag["days_no_entry"] += 1
-        if st.breakout_direction == "bull":
-            if st.dr_low_taken_after_break:
-                diag["bull_break_days_low_broken"] += 1
-            else:
-                diag["bull_break_days_low_held"] += 1
-        else:
-            if st.dr_high_taken_after_break:
-                diag["bear_break_days_high_broken"] += 1
-            else:
-                diag["bear_break_days_high_held"] += 1
-
-    # Summarize breakout→retest latency.
-    latencies = diag.pop("breakout_to_retest_minutes")
-    if latencies:
-        diag["avg_breakout_to_entry_minutes"] = sum(latencies) / len(latencies)
-    else:
-        diag["avg_breakout_to_entry_minutes"] = 0.0
-
-    # Serialize per-day states for downstream diagnostics (range buckets).
-    day_state_records = [
-        {
-            "date": str(st.day),
-            "valid": st.valid,
-            "skip_reason": st.skip_reason,
-            "dr_range_pips": (st.dr_range / pip_size) if st.dr_range is not None else None,
-            "dr_high": st.dr_high,
-            "dr_low": st.dr_low,
-            "breakout_direction": st.breakout_direction,
-            "breakout_time": st.breakout_time.isoformat() if st.breakout_time is not None else None,
-            "opposite_touch_time": (
-                st.opposite_touch_time.isoformat() if st.opposite_touch_time is not None else None
-            ),
-            "traded": st.traded,
-            "opposite_side_held": (
-                (st.breakout_direction == "bull" and not st.dr_low_taken_after_break)
-                or (st.breakout_direction == "bear" and not st.dr_high_taken_after_break)
-            ) if st.breakout_direction else None,
-        }
-        for st in day_states.values()
-    ]
+    day_state_records = [{"date": str(s.day), "trades_taken": s.trades_taken} for s in day_states.values()]
 
     return {
         "trades": [t.to_dict() for t in trades],

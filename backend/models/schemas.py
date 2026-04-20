@@ -44,6 +44,7 @@ class StrategyParamsSchema(BaseModel):
     last_entry_time: str = "13:00"
 
     # Risk / exits
+    stop_type: str = Field("dr_range")  # "dr_range" | "buffer_only"
     stop_buffer_pips: float = Field(3.0, ge=0.0, le=100.0)
     use_partial_tp: bool = True
     partial_tp_1_mult: float = Field(0.5, gt=0.0, le=5.0)
@@ -51,6 +52,13 @@ class StrategyParamsSchema(BaseModel):
     partial_tp_pct: float = Field(50.0, gt=0.0, lt=100.0)
     move_be_after_t1: bool = True
     max_trades_per_day: int = Field(1, ge=1, le=10)
+    max_profit_r: float = Field(2.5, ge=0.0, le=20.0)
+
+    # Circuit breakers
+    enable_daily_circuit_breaker: bool = True
+    daily_loss_limit_pct: float = Field(2.0, ge=0.0, le=100.0)
+    enable_weekly_circuit_breaker: bool = True
+    weekly_loss_limit_pct: float = Field(5.0, ge=0.0, le=100.0)
 
     # News filter
     enable_news_filter: bool = True
