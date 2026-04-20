@@ -21,6 +21,13 @@ from .indicators import build_indicator_frame
 from .news_calendar import classify_news_day, parse_custom_skip_dates
 
 
+# Directional-bias validation is measured from the breakout bar up to this NY
+# local time, with a small tolerance: any candle wick that comes within
+# BIAS_TOUCH_TOLERANCE_PIPS of the opposite DR level counts as "taken".
+BIAS_SESSION_END_LOCAL = "16:00"
+BIAS_TOUCH_TOLERANCE_PIPS = 2.0
+
+
 # Confirmation pattern group → (bullish column, bearish column).
 CONFIRMATION_PATTERN_COLS: dict[str, tuple[str, str]] = {
     "engulfing": ("bullish_engulfing", "bearish_engulfing"),
@@ -128,9 +135,11 @@ class _DayState:
     breakout_price: Optional[float] = None
     retest_deadline: Optional[pd.Timestamp] = None
     last_entry_deadline: Optional[pd.Timestamp] = None
+    bias_deadline: Optional[pd.Timestamp] = None  # 16:00 NY — cutoff for opposite-side tracking
     traded: bool = False
     dr_high_taken_after_break: bool = False
     dr_low_taken_after_break: bool = False
+    opposite_touch_time: Optional[pd.Timestamp] = None
 
 
 def _parse_time(s: str) -> dtime:
@@ -209,6 +218,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     max_range = float(params.max_dr_range_pips) * pip_size
     retest_tol = float(params.retest_tolerance_pips) * pip_size
     stop_buffer = float(params.stop_buffer_pips) * pip_size
+    bias_tolerance = BIAS_TOUCH_TOLERANCE_PIPS * pip_size
     partial_frac = float(params.partial_tp_pct) / 100.0
     entry_type = params.entry_type
     wants_retest = entry_type in ("retest_only", "retest_then_midpoint")
@@ -278,6 +288,7 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
                 dr_midpoint=(float(dr_high) + float(dr_low)) / 2.0,
             )
             state.last_entry_deadline = _deadline_ts(ts, params.last_entry_time, params.dr_timezone)
+            state.bias_deadline = _deadline_ts(ts, BIAS_SESSION_END_LOCAL, params.dr_timezone)
 
             # Day-of-week filter (based on NY date).
             dow = pd.Timestamp(state.day).weekday()
@@ -310,6 +321,29 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
         if post_dr_flag:
             diag["post_dr_bars"] += 1
+
+        # ---- Directional-bias tracking ----
+        # Run on EVERY bar after breakout (independent of trade state), up to the
+        # NY 16:00 cutoff. A candle wick within BIAS_TOUCH_TOLERANCE_PIPS of the
+        # opposite DR level counts as "opposite side taken".
+        if (
+            state is not None
+            and state.breakout_direction is not None
+            and not state.dr_low_taken_after_break
+            and not state.dr_high_taken_after_break
+            and state.bias_deadline is not None
+            and ts <= state.bias_deadline
+            and state.breakout_time is not None
+            and ts > state.breakout_time
+        ):
+            if state.breakout_direction == "bull":
+                if bar["low"] <= state.dr_low + bias_tolerance:
+                    state.dr_low_taken_after_break = True
+                    state.opposite_touch_time = ts
+            else:
+                if bar["high"] >= state.dr_high - bias_tolerance:
+                    state.dr_high_taken_after_break = True
+                    state.opposite_touch_time = ts
 
         # ---- Manage any open trade ----
         if open_trade is not None:
@@ -380,12 +414,6 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
         # ---- Signal generation (only on post-DR bars for valid days) ----
         if state is None or not state.valid or state.traded or open_trade is not None:
-            # Still track high/low taken post-breakout for directional bias.
-            if state is not None and state.breakout_direction is not None:
-                if state.breakout_direction == "bull" and bar["low"] <= state.dr_low:
-                    state.dr_low_taken_after_break = True
-                elif state.breakout_direction == "bear" and bar["high"] >= state.dr_high:
-                    state.dr_high_taken_after_break = True
             continue
 
         if not post_dr_flag:
@@ -574,6 +602,10 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             "dr_high": st.dr_high,
             "dr_low": st.dr_low,
             "breakout_direction": st.breakout_direction,
+            "breakout_time": st.breakout_time.isoformat() if st.breakout_time is not None else None,
+            "opposite_touch_time": (
+                st.opposite_touch_time.isoformat() if st.opposite_touch_time is not None else None
+            ),
             "traded": st.traded,
             "opposite_side_held": (
                 (st.breakout_direction == "bull" and not st.dr_low_taken_after_break)

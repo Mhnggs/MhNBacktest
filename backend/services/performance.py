@@ -272,17 +272,37 @@ def dr_entry_type_breakdown(trades: list[dict]) -> list[dict]:
             for name, group in df.groupby("entry_type_used")]
 
 
-def dr_directional_bias(day_states: list[dict]) -> dict:
+def _bias_sample(state: dict) -> dict:
+    """Compact sample row for directional-bias audit (manual TradingView check)."""
+    return {
+        "date": state.get("date"),
+        "direction": state.get("breakout_direction"),
+        "breakout_time": state.get("breakout_time"),
+        "opposite_touch_time": state.get("opposite_touch_time"),
+        "dr_high": state.get("dr_high"),
+        "dr_low": state.get("dr_low"),
+    }
+
+
+def dr_directional_bias(day_states: list[dict], sample_size: int = 5) -> dict:
     """Validate the core edge: after a DR breakout, does the opposite side hold?
 
     Returns counts and percentages for bull-break days (DR low held) and
-    bear-break days (DR high held).
+    bear-break days (DR high held), plus short dated samples of held/failed
+    days so the user can spot-check on TradingView.
     """
     bulls = [s for s in day_states if s.get("breakout_direction") == "bull"]
     bears = [s for s in day_states if s.get("breakout_direction") == "bear"]
 
     bull_held = sum(1 for s in bulls if s.get("opposite_side_held"))
     bear_held = sum(1 for s in bears if s.get("opposite_side_held"))
+
+    # Sort both pools chronologically so samples are reproducible.
+    all_breakouts = sorted(
+        bulls + bears, key=lambda s: s.get("date") or ""
+    )
+    held_days = [s for s in all_breakouts if s.get("opposite_side_held")]
+    failed_days = [s for s in all_breakouts if not s.get("opposite_side_held")]
 
     return {
         "bull_break_days": len(bulls),
@@ -297,6 +317,8 @@ def dr_directional_bias(day_states: list[dict]) -> dict:
             (bull_held + bear_held) / (len(bulls) + len(bears)) * 100.0
             if (bulls or bears) else 0.0
         ),
+        "held_days_sample": [_bias_sample(s) for s in held_days[:sample_size]],
+        "failed_days_sample": [_bias_sample(s) for s in failed_days[:sample_size]],
     }
 
 

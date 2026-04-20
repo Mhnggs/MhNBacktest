@@ -21,6 +21,52 @@ function pct(num, denom) {
   return `${((num / denom) * 100).toFixed(1)}%`
 }
 
+function fmtTime(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return '—'
+  return d.toISOString().slice(11, 16) + 'Z'
+}
+
+function BiasSampleList({ title, rows, showTouch }) {
+  if (!rows || rows.length === 0) return null
+  return (
+    <div className="mt-1">
+      <div className="text-[11px] text-gray-400">{title}</div>
+      <ul className="font-mono text-[11px] text-gray-300 space-y-0.5">
+        {rows.map((r, i) => (
+          <li key={i} className="flex items-center gap-2">
+            <span className="text-gray-200">{r.date}</span>
+            <span className={r.direction === 'bull' ? 'text-good' : 'text-bad'}>
+              {r.direction}
+            </span>
+            <span className="text-gray-500">brk {fmtTime(r.breakout_time)}</span>
+            {showTouch && r.opposite_touch_time && (
+              <span className="text-gray-500">→ {fmtTime(r.opposite_touch_time)}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function BiasSamples({ bias }) {
+  const held = bias?.held_days_sample
+  const failed = bias?.failed_days_sample
+  if ((!held || held.length === 0) && (!failed || failed.length === 0)) return null
+  return (
+    <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-border/60 pt-2">
+      <BiasSampleList title="Held samples (opposite NOT taken)" rows={held} />
+      <BiasSampleList
+        title="Failed samples (opposite WAS taken)"
+        rows={failed}
+        showTouch
+      />
+    </div>
+  )
+}
+
 export default function Diagnostics() {
   const results = useBacktestStore((s) => s.results)
   if (!results) return null
@@ -73,9 +119,11 @@ export default function Diagnostics() {
           <div className="text-gray-500 italic">No breakout days yet — run a longer window.</div>
         )}
         <div className="text-[11px] text-gray-500 mt-1 leading-relaxed">
-          The classic DR claim is ~70%. Above this threshold validates the
-          directional edge on your dataset.
+          Opposite side = wick within 2 pips of the opposite DR level between
+          breakout and 16:00 NY. Classic claim is ~70%; 60-75% validates the
+          edge on your dataset.
         </div>
+        <BiasSamples bias={bias} />
       </div>
 
       <div className="border-t border-border pt-2">
