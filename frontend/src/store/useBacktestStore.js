@@ -6,38 +6,61 @@ export const defaultParams = {
   starting_capital: 10000,
   risk_per_trade_pct: 1.0,
 
-  // DR window
-  dr_start_time: '09:30',
-  dr_end_time: '10:30',
-  dr_timezone: 'America/New_York',
-  min_dr_range_pips: 15,
-  max_dr_range_pips: 70,
+  // Kill zones (NY time windows)
+  enable_london_sb: true,
+  enable_ny_sb: true,
+  enable_ny_pm_sb: false,
 
-  // Entry
-  entry_type: 'retest_then_midpoint',
-  retest_tolerance_pips: 5,
-  require_confirmation_candle: true,
-  confirmation_patterns: ['marubozu', 'engulfing'],
+  // Liquidity detection
+  swing_lookback: 5,
+  equal_level_tolerance_pips: 3,
+  min_sweep_pips: 3,
+  sweep_confirmation_candles: 3,
 
-  // Time limits
-  retest_window_minutes: 90,
-  last_entry_time: '13:00',
+  // Displacement
+  displacement_body_pips: 8,
+  displacement_close_pct: 0.7,
+
+  // FVG
+  min_fvg_size_pips: 3,
+  fvg_max_age_candles: 20,
+  fvg_entry_type: '50% midpoint',
+
+  // MSS
+  require_mss: true,
+
+  // Order block
+  require_ob_confluence: false,
+
+  // HTF bias
+  require_htf_alignment: true,
+  htf_neutral_action: 'Skip trade',
 
   // Risk / exits
+  stop_type: 'Beyond sweep',
   stop_buffer_pips: 3,
+  fixed_stop_pips: 10,
+  rr_ratio: 2.0,
   use_partial_tp: true,
-  partial_tp_1_mult: 0.5,
-  partial_tp_2_mult: 1.0,
-  partial_tp_pct: 50,
-  move_be_after_t1: true,
-  max_trades_per_day: 1,
+  max_trades_per_killzone: 1,
+  max_trades_per_day: 2,
+  close_at_killzone_end: true,
 
-  // News filter
+  // Confluence
+  min_confluence_score: 5,
+
+  // Filters
   enable_news_filter: true,
   custom_skip_dates: [],
-
-  // Day-of-week filter
   allowed_days: [0, 1, 2, 3, 4],
+  min_fvg_to_stop_ratio: 0.5,
+  spread_pips: 0.2,
+
+  // Circuit breakers
+  enable_daily_circuit_breaker: true,
+  daily_loss_limit_pct: 2.0,
+  enable_weekly_circuit_breaker: true,
+  weekly_loss_limit_pct: 5.0,
 }
 
 export const useBacktestStore = create((set, get) => ({

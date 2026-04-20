@@ -5,6 +5,12 @@ const PAGE_SIZE = 25
 
 const DOW_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
+const KZ_LABELS = {
+  london_sb: 'London SB',
+  ny_sb: 'NY AM SB',
+  ny_pm_sb: 'NY PM SB',
+}
+
 function fmtMoney(v) {
   if (v == null || isNaN(v)) return '—'
   const sign = v < 0 ? '-' : ''
@@ -16,11 +22,26 @@ function fmtPct(v, digits = 2) {
   return `${v.toFixed(digits)}%`
 }
 
+function tradeRiskDollars(t) {
+  const dist = Math.abs((t.entry_price ?? 0) - (t.stop ?? 0))
+  const size = t.size || 0
+  if (!dist || !size) return null
+  return dist * size
+}
+
+function tradeR(t) {
+  const risk = tradeRiskDollars(t)
+  if (!risk || t.pnl == null) return null
+  return t.pnl / risk
+}
+
 function exportCsv(trades) {
   if (!trades || !trades.length) return
   const cols = [
-    'id', 'direction', 'session', 'pattern', 'entry_time', 'entry_price', 'stop',
-    'target', 'exit_time', 'exit_price', 'pnl', 'pnl_pct', 'result',
+    'id', 'direction', 'kill_zone', 'confluence_score', 'htf_bias',
+    'sweep_level_type', 'fvg_size_pips', 'mss_confirmed',
+    'entry_time', 'entry_price', 'stop', 'target1', 'target2',
+    'exit_time', 'exit_price', 'pnl', 'result', 'exit_reason',
   ]
   const lines = [cols.join(',')]
   for (const t of trades) {
@@ -37,7 +58,6 @@ function exportCsv(trades) {
 
 function dayIndex(isoString) {
   if (!isoString) return null
-  // JS getDay: 0=Sun..6=Sat  →  remap to 0=Mon..6=Sun
   const d = new Date(isoString).getDay()
   return (d + 6) % 7
 }
@@ -51,7 +71,8 @@ export default function TradeLog() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [dow, setDow] = useState('all')
-  const [sessionFilter, setSessionFilter] = useState('all')
+  const [killZone, setKillZone] = useState('all')
+  const [htfBias, setHtfBias] = useState('all')
   const [sortKey, setSortKey] = useState('entry_time')
   const [sortDir, setSortDir] = useState('asc')
   const [page, setPage] = useState(1)
@@ -68,8 +89,11 @@ export default function TradeLog() {
       const target = Number(dow)
       rows = rows.filter((t) => dayIndex(t.entry_time) === target)
     }
-    if (sessionFilter !== 'all') {
-      rows = rows.filter((t) => (t.session || '') === sessionFilter)
+    if (killZone !== 'all') {
+      rows = rows.filter((t) => (t.kill_zone || '') === killZone)
+    }
+    if (htfBias !== 'all') {
+      rows = rows.filter((t) => (t.htf_bias || '') === htfBias)
     }
     rows = [...rows].sort((a, b) => {
       const av = a[sortKey], bv = b[sortKey]
@@ -78,11 +102,17 @@ export default function TradeLog() {
       return sortDir === 'asc' ? cmp : -cmp
     })
     return rows
-  }, [trades, direction, result, dateFrom, dateTo, dow, sessionFilter, sortKey, sortDir])
+  }, [trades, direction, result, dateFrom, dateTo, dow, killZone, htfBias, sortKey, sortDir])
 
-  const sessionChoices = useMemo(() => {
+  const killZoneChoices = useMemo(() => {
     const s = new Set()
-    for (const t of trades) if (t.session) s.add(t.session)
+    for (const t of trades) if (t.kill_zone) s.add(t.kill_zone)
+    return Array.from(s).sort()
+  }, [trades])
+
+  const htfChoices = useMemo(() => {
+    const s = new Set()
+    for (const t of trades) if (t.htf_bias) s.add(t.htf_bias)
     return Array.from(s).sort()
   }, [trades])
 
@@ -94,8 +124,8 @@ export default function TradeLog() {
       pnl += t.pnl || 0
       if (t.result === 'win') { wins += 1; grossW += t.pnl }
       else if (t.result === 'loss') { losses += 1; grossL += -t.pnl }
-      const risk = t.risk_per_unit && t.units ? t.risk_per_unit * (t.units || 1) : null
-      if (risk && risk > 0 && t.pnl != null) { rSum += t.pnl / risk; rCount += 1 }
+      const r = tradeR(t)
+      if (r != null) { rSum += r; rCount += 1 }
     }
     return {
       count: n,
@@ -119,7 +149,7 @@ export default function TradeLog() {
 
   function clearFilters() {
     setDirection('all'); setResult('all'); setDateFrom(''); setDateTo(''); setDow('all')
-    setSessionFilter('all')
+    setKillZone('all'); setHtfBias('all')
     setPage(1)
   }
 
@@ -129,6 +159,25 @@ export default function TradeLog() {
   }
 
   if (!results) return null
+
+  const HEADERS = [
+    ['id', '#'],
+    ['entry_time', 'Entry Time'],
+    ['direction', 'Dir'],
+    ['kill_zone', 'Kill Zone'],
+    ['confluence_score', '⭐'],
+    ['htf_bias', 'HTF'],
+    ['sweep_level_type', 'Sweep'],
+    ['fvg_size_pips', 'FVG px'],
+    ['entry_price', 'Entry'],
+    ['stop', 'Stop'],
+    ['target1', 'T1'],
+    ['target2', 'T2'],
+    ['exit_price', 'Exit'],
+    ['pnl', 'P&L $'],
+    ['result', 'Result'],
+    ['exit_reason', 'Exit'],
+  ]
 
   return (
     <div className="card">
@@ -146,17 +195,25 @@ export default function TradeLog() {
           <option value="win">Wins</option>
           <option value="loss">Losses</option>
           <option value="breakeven">Breakeven</option>
-          <option value="timeout">Timeout</option>
         </select>
         <select className="input w-auto text-xs py-1" value={dow} onChange={(e) => { setDow(e.target.value); setPage(1) }}>
           <option value="all">All Days</option>
           {DOW_LABELS.map((d, i) => <option key={i} value={i}>{d}</option>)}
         </select>
-        {sessionChoices.length > 0 && (
-          <select className="input w-auto text-xs py-1" value={sessionFilter}
-            onChange={(e) => { setSessionFilter(e.target.value); setPage(1) }}>
-            <option value="all">All Sessions</option>
-            {sessionChoices.map((s) => <option key={s} value={s}>{s}</option>)}
+        {killZoneChoices.length > 0 && (
+          <select className="input w-auto text-xs py-1" value={killZone}
+            onChange={(e) => { setKillZone(e.target.value); setPage(1) }}>
+            <option value="all">All Kill Zones</option>
+            {killZoneChoices.map((s) => (
+              <option key={s} value={s}>{KZ_LABELS[s] || s}</option>
+            ))}
+          </select>
+        )}
+        {htfChoices.length > 0 && (
+          <select className="input w-auto text-xs py-1" value={htfBias}
+            onChange={(e) => { setHtfBias(e.target.value); setPage(1) }}>
+            <option value="all">All HTF Bias</option>
+            {htfChoices.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         )}
         <input className="input w-auto text-xs py-1" type="date" value={dateFrom}
@@ -171,12 +228,7 @@ export default function TradeLog() {
         <table className="w-full text-xs">
           <thead className="text-gray-400 border-b border-border">
             <tr>
-              {[
-                ['id', '#'], ['entry_time', 'Entry Time'], ['direction', 'Dir'],
-                ['session', 'Session'], ['pattern', 'Pattern'],
-                ['entry_price', 'Entry'], ['stop', 'Stop'], ['target', 'Target'],
-                ['exit_price', 'Exit'], ['pnl', 'P&L $'], ['pnl_pct', 'P&L %'], ['result', 'Result'],
-              ].map(([k, label]) => (
+              {HEADERS.map(([k, label]) => (
                 <th key={k} className="text-left py-2 px-2 cursor-pointer hover:text-accent" onClick={() => toggleSort(k)}>
                   {label}{sortKey === k ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
                 </th>
@@ -202,15 +254,21 @@ export default function TradeLog() {
                   <td className="px-2 py-1.5 uppercase">
                     <span className={t.direction === 'long' ? 'text-good' : 'text-bad'}>{t.direction}</span>
                   </td>
-                  <td className="px-2 py-1.5 text-gray-300 text-[11px]">{t.session || '—'}</td>
-                  <td className="px-2 py-1.5 text-gray-300 text-[11px]">{t.pattern || '—'}</td>
+                  <td className="px-2 py-1.5 text-gray-300 text-[11px]">{KZ_LABELS[t.kill_zone] || t.kill_zone || '—'}</td>
+                  <td className="px-2 py-1.5 font-mono text-gray-200">{t.confluence_score ?? '—'}</td>
+                  <td className="px-2 py-1.5 text-gray-300 text-[11px]">{t.htf_bias || '—'}</td>
+                  <td className="px-2 py-1.5 text-gray-300 text-[11px]">{t.sweep_level_type || '—'}</td>
+                  <td className="px-2 py-1.5 font-mono text-gray-300">
+                    {t.fvg_size_pips != null ? t.fvg_size_pips.toFixed(1) : '—'}
+                  </td>
                   <td className="px-2 py-1.5 font-mono">{t.entry_price?.toFixed(5)}</td>
                   <td className="px-2 py-1.5 font-mono">{t.stop?.toFixed(5)}</td>
-                  <td className="px-2 py-1.5 font-mono">{t.target?.toFixed(5)}</td>
+                  <td className="px-2 py-1.5 font-mono">{t.target1?.toFixed(5)}</td>
+                  <td className="px-2 py-1.5 font-mono">{t.target2?.toFixed(5)}</td>
                   <td className="px-2 py-1.5 font-mono">{t.exit_price?.toFixed(5)}</td>
                   <td className={`px-2 py-1.5 font-mono ${t.pnl >= 0 ? 'text-good' : 'text-bad'}`}>{fmtMoney(t.pnl)}</td>
-                  <td className={`px-2 py-1.5 font-mono ${t.pnl_pct >= 0 ? 'text-good' : 'text-bad'}`}>{t.pnl_pct?.toFixed(2)}%</td>
                   <td className="px-2 py-1.5 uppercase text-xs">{t.result}</td>
+                  <td className="px-2 py-1.5 text-gray-400 text-[11px]">{t.exit_reason || '—'}</td>
                   <td className="px-2 py-1.5 text-right">
                     <button
                       className="btn btn-ghost px-2 py-0.5 text-[10px]"
@@ -223,34 +281,29 @@ export default function TradeLog() {
               )
             })}
             {!view.length && (
-              <tr><td colSpan={13} className="px-2 py-6 text-center text-gray-500">No trades match the filters.</td></tr>
+              <tr><td colSpan={HEADERS.length + 1} className="px-2 py-6 text-center text-gray-500">No trades match the filters.</td></tr>
             )}
           </tbody>
           {summary && (
             <tfoot className="border-t-2 border-border bg-bg/40 font-mono text-xs">
               <tr>
-                <td className="px-2 py-2 text-gray-400" colSpan={2}>
-                  Summary ({summary.count} trade{summary.count === 1 ? '' : 's'})
+                <td className="px-2 py-2 text-gray-400" colSpan={3}>
+                  {summary.count} trade{summary.count === 1 ? '' : 's'} · {summary.wins}W / {summary.losses}L
                 </td>
-                <td className="px-2 py-2 text-gray-400">
-                  {summary.wins}W / {summary.losses}L
-                </td>
-                <td className="px-2 py-2 text-gray-400" colSpan={5}>
+                <td className="px-2 py-2 text-gray-400" colSpan={4}>
                   Win rate <span className="text-gray-100">{fmtPct(summary.win_rate, 1)}</span>
                 </td>
-                <td className="px-2 py-2 text-gray-400">
+                <td className="px-2 py-2 text-gray-400" colSpan={4}>
                   PF <span className="text-gray-100">
                     {summary.profit_factor === Infinity ? '∞' : summary.profit_factor.toFixed(2)}
                   </span>
                 </td>
-                <td className={`px-2 py-2 ${summary.pnl >= 0 ? 'text-good' : 'text-bad'}`}>
-                  {fmtMoney(summary.pnl)}
+                <td className="px-2 py-2" colSpan={2}>
+                  <span className={summary.pnl >= 0 ? 'text-good' : 'text-bad'}>{fmtMoney(summary.pnl)}</span>
                 </td>
-                <td className="px-2 py-2 text-gray-400">
+                <td className="px-2 py-2 text-gray-400" colSpan={4}>
                   Avg <span className={summary.avg >= 0 ? 'text-good' : 'text-bad'}>{fmtMoney(summary.avg)}</span>
-                </td>
-                <td className="px-2 py-2 text-gray-400" colSpan={2}>
-                  {summary.avg_r != null ? <>Avg R <span className="text-gray-100">{summary.avg_r.toFixed(2)}</span></> : null}
+                  {summary.avg_r != null && <> · Avg R <span className="text-gray-100">{summary.avg_r.toFixed(2)}</span></>}
                 </td>
               </tr>
             </tfoot>

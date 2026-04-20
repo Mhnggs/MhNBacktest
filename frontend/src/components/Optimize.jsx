@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { useBacktestStore } from '../store/useBacktestStore'
 import { getOptimizeOptions, runOptimize } from '../api/client'
 
-const DEFAULT_X = 'min_dr_range_pips'
-const DEFAULT_Y = 'retest_tolerance_pips'
+const DEFAULT_X = 'min_sweep_pips'
+const DEFAULT_Y = 'displacement_body_pips'
 const DEFAULT_METRIC = 'sharpe_ratio'
 
 const METRIC_LABELS = {
@@ -90,11 +90,11 @@ export default function Optimize() {
   const [xParam, setXParam] = useState(DEFAULT_X)
   const [yParam, setYParam] = useState(DEFAULT_Y)
   const [metric, setMetric] = useState(DEFAULT_METRIC)
-  const [xStart, setXStart] = useState(10)
-  const [xEnd, setXEnd] = useState(30)
-  const [xStep, setXStep] = useState(5)
-  const [yStart, setYStart] = useState(2)
-  const [yEnd, setYEnd] = useState(10)
+  const [xStart, setXStart] = useState(2)
+  const [xEnd, setXEnd] = useState(8)
+  const [xStep, setXStep] = useState(1)
+  const [yStart, setYStart] = useState(4)
+  const [yEnd, setYEnd] = useState(12)
   const [yStep, setYStep] = useState(2)
 
   useEffect(() => {

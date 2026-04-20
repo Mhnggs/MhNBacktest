@@ -1,70 +1,68 @@
-"""Smoke test: synthetic DR day → run_backtest → compute_stats."""
+"""Smoke tests for the ICT Silver Bullet backtester.
+
+Each test builds a small synthetic candle series in New York time, runs
+the indicator pipeline and the backtest runner, and asserts that the
+output shape is correct. These aren't exhaustive strategy validations —
+they guard against import/serialisation/schema regressions.
+"""
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from backend.services.indicators import build_indicator_frame
-from backend.services.performance import compute_stats
+from backend.services.performance import compute_stats, kill_zone_breakdown
 from backend.services.strategy import StrategyParams, run_backtest
 
 
-def _synthetic_dr_day(day: str = "2024-02-06") -> pd.DataFrame:
-    """One NY-day with a clean bull breakout of the 09:30-10:30 DR."""
-    rng = pd.date_range(f"{day} 00:00", f"{day} 23:55", freq="5min", tz="America/New_York")
-    rng_utc = rng.tz_convert("UTC")
-    rows = []
-    for ts in rng:
-        hm = ts.hour + ts.minute / 60.0
-        if 9.5 <= hm < 10.5:
-            o, c = 1.1000, 1.1005
-            h, l = 1.1010, 1.0995
-        elif 10.5 <= hm < 10.6:
-            o, c = 1.1005, 1.1020  # breakout
-            h, l = 1.1022, 1.1003
-        elif 10.6 <= hm < 10.7:
-            o, c = 1.1020, 1.1013  # retest toward dr_high
-            h, l = 1.1021, 1.1011
-        elif 10.7 <= hm < 10.8:
-            o, c = 1.1013, 1.1050  # confirmation + move up
-            h, l = 1.1055, 1.1012
-        else:
-            o = c = 1.1050
-            h = l = 1.1050
-        rows.append({"open": o, "high": h, "low": l, "close": c, "volume": 1000.0})
-    df = pd.DataFrame(rows)
-    df.insert(0, "datetime", rng_utc)
-    return df
+def _synthetic_frame(days: int = 5) -> pd.DataFrame:
+    """Several weekdays of flat 5m candles in NY time → UTC."""
+    rng_ny = pd.date_range("2024-02-05 00:00", periods=12 * 24 * days, freq="5min",
+                           tz="America/New_York")
+    df = pd.DataFrame({
+        "datetime": rng_ny.tz_convert("UTC"),
+        "open": 1.1000, "high": 1.1002, "low": 1.0998, "close": 1.1000,
+        "volume": 1000.0,
+    })
+    return df.reset_index(drop=True)
 
 
-def test_indicators_attach_dr_columns():
-    df = _synthetic_dr_day()
+def test_indicators_attach_silver_bullet_columns():
+    df = _synthetic_frame()
     out = build_indicator_frame(df)
-    for col in ["dr_high", "dr_low", "dr_range", "dr_midpoint", "post_dr"]:
-        assert col in out.columns
-    post = out[out["post_dr"]]
-    assert not post.empty
-    # dr_high must be >= dr_low on post-DR bars
-    assert (post["dr_high"] >= post["dr_low"]).all()
+    for col in [
+        "is_swing_high", "is_swing_low",
+        "prev_day_high", "prev_day_low",
+        "is_bull_disp", "is_bear_disp",
+        "fvg_bull_top", "fvg_bear_top",
+        "kill_zone", "htf_bias",
+    ]:
+        assert col in out.columns, f"missing column {col}"
+    # Kill zones are flagged in the right NY hours.
+    ny = out["datetime"].dt.tz_convert("America/New_York")
+    ny_sb_mask = (ny.dt.hour == 10)
+    assert out.loc[ny_sb_mask, "kill_zone"].eq("ny").all()
 
 
 def test_run_backtest_returns_structure():
-    df = _synthetic_dr_day()
+    df = _synthetic_frame()
     params = StrategyParams(
-        min_dr_range_pips=5.0,
-        max_dr_range_pips=500.0,
-        require_confirmation_candle=False,
         enable_news_filter=False,
+        require_mss=False,
+        require_htf_alignment=False,
+        min_confluence_score=4,
     )
     out = run_backtest(df, params)
     assert "trades" in out and "equity_curve" in out and "diagnostics" in out
+    assert "setup_funnel" in out["diagnostics"]
     stats = compute_stats(out["trades"], out["equity_curve"], params.starting_capital)
     assert "total_trades" in stats
     assert stats["starting_capital"] == params.starting_capital
+    # Breakdowns don't crash on empty trade lists.
+    assert isinstance(kill_zone_breakdown(out["trades"]), list)
 
 
 if __name__ == "__main__":
-    test_indicators_attach_dr_columns()
+    test_indicators_attach_silver_bullet_columns()
     test_run_backtest_returns_structure()
     print("smoke ok")

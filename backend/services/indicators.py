@@ -1,9 +1,15 @@
-"""Indicator calculations for the RSI Exhaustion Mean Reversion strategy.
+"""Indicator calculations for the ICT Silver Bullet strategy.
 
-Adds: RSI (Wilder, 3 periods), Bollinger Bands + width, ADX, daily-reset
-VWAP + standard-deviation bands, previous-day high/low/open/close, daily open,
-weekly open, London session high/low, plus candlestick pattern flags used for
-optional confirmation.
+Per-candle flags/columns computed here:
+  - Swing highs/lows (lookback-confirmed)
+  - Previous-day high/low and previous-session (London/NY) high/low
+  - Displacement flags (bullish/bearish body + close-position check)
+  - Fair Value Gap formation at bar i (3-candle pattern: c1=i-2, c2=i-1, c3=i)
+  - Kill-zone flags (London SB / NY SB / NY PM SB, in America/New_York)
+  - Higher-timeframe bias (resampled to 1H, broadcast to 5m) — "bullish",
+    "bearish", or "neutral" per candle.
+
+The strategy runner turns these flags into a stateful setup machine.
 """
 
 from __future__ import annotations
@@ -13,175 +19,258 @@ import pandas as pd
 import pytz
 
 
-def _wilder_rsi(close: pd.Series, period: int) -> pd.Series:
-    """Standard RSI using Wilder's smoothing (EMA with alpha = 1/period)."""
-    delta = close.diff()
-    gain = delta.clip(lower=0.0)
-    loss = (-delta).clip(lower=0.0)
-    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0.0, np.nan)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    # When avg_loss is zero and there has been any gain, RSI is 100.
-    rsi = rsi.where(~((avg_loss == 0) & (avg_gain > 0)), 100.0)
-    # When both are zero (flat), RSI is 50.
-    rsi = rsi.where(~((avg_loss == 0) & (avg_gain == 0)), 50.0)
-    return rsi
+NY_TZ = "America/New_York"
+LONDON_TZ = "Europe/London"
 
 
-def add_rsi(df: pd.DataFrame, fast: int = 2, medium: int = 3, slow: int = 14) -> pd.DataFrame:
+# ---------- Swing detection ----------
+
+def add_swings(df: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
+    """A swing high requires high > all highs in lookback candles on each side.
+
+    Lookback uses FUTURE candles (N bars after the pivot), so a swing at
+    index i is only confirmed at index i+lookback. The strategy runner
+    must respect this to avoid look-ahead bias.
+    """
     out = df.copy()
-    out["rsi_fast"] = _wilder_rsi(out["close"], fast)
-    out["rsi_medium"] = _wilder_rsi(out["close"], medium)
-    out["rsi_slow"] = _wilder_rsi(out["close"], slow)
+    n = len(out)
+    high = out["high"].to_numpy()
+    low = out["low"].to_numpy()
+
+    is_sh = np.zeros(n, dtype=bool)
+    is_sl = np.zeros(n, dtype=bool)
+    for i in range(lookback, n - lookback):
+        left_h = high[i - lookback : i]
+        right_h = high[i + 1 : i + lookback + 1]
+        left_l = low[i - lookback : i]
+        right_l = low[i + 1 : i + lookback + 1]
+        if (left_h < high[i]).all() and (right_h < high[i]).all():
+            is_sh[i] = True
+        if (left_l > low[i]).all() and (right_l > low[i]).all():
+            is_sl[i] = True
+    out["is_swing_high"] = is_sh
+    out["is_swing_low"] = is_sl
     return out
 
 
-def add_bollinger(df: pd.DataFrame, period: int = 20, std: float = 2.0) -> pd.DataFrame:
-    out = df.copy()
-    mid = out["close"].rolling(period, min_periods=period).mean()
-    sd = out["close"].rolling(period, min_periods=period).std(ddof=0)
-    out["bb_middle"] = mid
-    out["bb_upper"] = mid + std * sd
-    out["bb_lower"] = mid - std * sd
-    out["bb_width"] = (out["bb_upper"] - out["bb_lower"]) / out["bb_middle"].replace(0, np.nan)
-    return out
+# ---------- Previous-day / previous-session levels ----------
 
-
-def add_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-    """Wilder's ADX."""
-    out = df.copy()
-    high, low, close = out["high"], out["low"], out["close"]
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    up_move = high.diff()
-    down_move = -low.diff()
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-    atr = tr.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
-    plus_di = 100.0 * plus_dm.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean() / atr.replace(0, np.nan)
-    minus_di = 100.0 * minus_dm.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean() / atr.replace(0, np.nan)
-    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    out["adx"] = dx.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
-    return out
-
-
-def add_vwap_bands(df: pd.DataFrame, tz: str = "America/New_York") -> pd.DataFrame:
-    """Daily-reset VWAP with ±1σ / ±2σ bands (volume-weighted typical price)."""
-    out = df.copy()
-    if not isinstance(out["datetime"].dtype, pd.DatetimeTZDtype):
-        raise ValueError("add_vwap_bands requires timezone-aware datetimes")
-    local = out["datetime"].dt.tz_convert(pytz.timezone(tz))
-    dates = local.dt.date.values
-
-    tp = ((out["high"] + out["low"] + out["close"]) / 3.0).to_numpy()
-    v = out["volume"].fillna(1.0).to_numpy()
-    pv = tp * v
-
-    vwap = np.zeros(len(out))
-    sd = np.zeros(len(out))
-
-    current = None
-    cum_pv = cum_v = cum_dev2 = 0.0
-    for i in range(len(out)):
-        d = dates[i]
-        if d != current:
-            current = d
-            cum_pv = cum_v = cum_dev2 = 0.0
-        cum_pv += pv[i]
-        cum_v += v[i]
-        vw = cum_pv / cum_v if cum_v > 0 else tp[i]
-        vwap[i] = vw
-        cum_dev2 += (tp[i] - vw) ** 2 * v[i]
-        sd[i] = np.sqrt(cum_dev2 / cum_v) if cum_v > 0 else 0.0
-
-    out["vwap"] = vwap
-    out["vwap_sd"] = sd
-    out["vwap_upper_1"] = vwap + sd
-    out["vwap_upper_2"] = vwap + 2.0 * sd
-    out["vwap_lower_1"] = vwap - sd
-    out["vwap_lower_2"] = vwap - 2.0 * sd
-    return out
-
-
-def add_prev_day_levels(df: pd.DataFrame, tz: str = "America/New_York") -> pd.DataFrame:
-    """Attach previous-day high/low/open/close and today's daily/weekly open."""
+def add_prev_day_levels(df: pd.DataFrame, tz: str = NY_TZ) -> pd.DataFrame:
+    """Previous-day high/low in NY time. Stamped on every bar of a given day."""
     out = df.copy()
     local = out["datetime"].dt.tz_convert(pytz.timezone(tz))
     dates = pd.Series(local.dt.date.values, index=out.index, name="_d")
-
     by_day = out.groupby(dates)
     day_hi = by_day["high"].max()
     day_lo = by_day["low"].min()
-    day_op = by_day["open"].first()
-    day_cl = by_day["close"].last()
-
-    day_hi.index.name = "_d"
     prev_hi = day_hi.shift(1)
     prev_lo = day_lo.shift(1)
-    prev_op = day_op.shift(1)
-    prev_cl = day_cl.shift(1)
-
-    out["daily_open"] = dates.map(day_op).values
     out["prev_day_high"] = dates.map(prev_hi).values
     out["prev_day_low"] = dates.map(prev_lo).values
-    out["prev_day_open"] = dates.map(prev_op).values
-    out["prev_day_close"] = dates.map(prev_cl).values
-
-    # Weekly open: first bar's open per ISO-week year/week.
-    iso = local.dt.isocalendar()
-    week_key = iso["year"].astype(str) + "-" + iso["week"].astype(str)
-    week_series = pd.Series(week_key.values, index=out.index, name="_w")
-    week_open = out.groupby(week_series)["open"].transform("first")
-    out["weekly_open"] = week_open.values
     return out
 
 
-def add_london_session_levels(df: pd.DataFrame) -> pd.DataFrame:
-    """London session high/low (08:00-16:00 Europe/London). Populated AFTER
-    16:00 London for the rest of that local day so NY session can reference it.
+def add_prev_session_levels(df: pd.DataFrame) -> pd.DataFrame:
+    """Previous London session (08:00-16:00 London) and previous NY session
+    (09:30-16:00 NY) highs/lows. Stamped AFTER the session closes for the
+    current local day so subsequent kill zones can reference them.
     """
     out = df.copy()
-    london = out["datetime"].dt.tz_convert(pytz.timezone("Europe/London"))
-    out["_lon_date"] = london.dt.date.values
-    out["_lon_hhmm"] = (london.dt.hour + london.dt.minute / 60.0).values
 
-    in_london = (out["_lon_hhmm"] >= 8.0) & (out["_lon_hhmm"] < 16.0)
-    # High/low per London-date restricted to in-session bars.
-    session_df = out[in_london]
-    session_hi = session_df.groupby("_lon_date")["high"].max()
-    session_lo = session_df.groupby("_lon_date")["low"].min()
+    london_local = out["datetime"].dt.tz_convert(pytz.timezone(LONDON_TZ))
+    ny_local = out["datetime"].dt.tz_convert(pytz.timezone(NY_TZ))
 
-    out["london_high"] = out["_lon_date"].map(session_hi)
-    out["london_low"] = out["_lon_date"].map(session_lo)
-    # Mask before 16:00 London so intra-session partial values aren't used.
-    after_session = out["_lon_hhmm"] >= 16.0
-    out.loc[~after_session, "london_high"] = np.nan
-    out.loc[~after_session, "london_low"] = np.nan
-    out = out.drop(columns=["_lon_date", "_lon_hhmm"])
+    lon_hhmm = london_local.dt.hour + london_local.dt.minute / 60.0
+    ny_hhmm = ny_local.dt.hour + ny_local.dt.minute / 60.0
+    lon_date = pd.Series(london_local.dt.date.values, index=out.index)
+    ny_date = pd.Series(ny_local.dt.date.values, index=out.index)
+
+    in_london = (lon_hhmm >= 8.0) & (lon_hhmm < 16.0)
+    in_ny = (ny_hhmm >= 9.5) & (ny_hhmm < 16.0)
+
+    lon_sub = out.loc[in_london].copy()
+    lon_sub["_d"] = lon_date[in_london].values
+    lon_hi = lon_sub.groupby("_d")["high"].max().shift(1)
+    lon_lo = lon_sub.groupby("_d")["low"].min().shift(1)
+
+    ny_sub = out.loc[in_ny].copy()
+    ny_sub["_d"] = ny_date[in_ny].values
+    ny_hi = ny_sub.groupby("_d")["high"].max().shift(1)
+    ny_lo = ny_sub.groupby("_d")["low"].min().shift(1)
+
+    out["prev_london_high"] = lon_date.map(lon_hi).values
+    out["prev_london_low"] = lon_date.map(lon_lo).values
+    out["prev_ny_high"] = ny_date.map(ny_hi).values
+    out["prev_ny_low"] = ny_date.map(ny_lo).values
     return out
 
 
+# ---------- Displacement ----------
+
+def add_displacement(
+    df: pd.DataFrame,
+    min_body_pips: float = 8.0,
+    pip_size: float = 0.0001,
+    close_pct: float = 0.70,
+) -> pd.DataFrame:
+    """A displacement bar has a large body that closes in the extreme end of
+    its range. Signals are only flagged on the confirming candle.
+    """
+    out = df.copy()
+    body = (out["close"] - out["open"]).abs()
+    rng = (out["high"] - out["low"]).replace(0, np.nan)
+    min_body = min_body_pips * pip_size
+
+    bull = out["close"] > out["open"]
+    bear = out["close"] < out["open"]
+
+    bull_close_pos = (out["close"] - out["low"]) / rng
+    bear_close_pos = (out["high"] - out["close"]) / rng
+
+    out["is_bull_disp"] = (bull & (body >= min_body) & (bull_close_pos >= close_pct)).fillna(False)
+    out["is_bear_disp"] = (bear & (body >= min_body) & (bear_close_pos >= close_pct)).fillna(False)
+    out["body_pips"] = (body / pip_size).fillna(0.0)
+    return out
+
+
+# ---------- Fair Value Gap ----------
+
+def add_fvg(df: pd.DataFrame, pip_size: float = 0.0001, min_size_pips: float = 3.0) -> pd.DataFrame:
+    """Bullish FVG at bar i: candle i-1 is a bullish displacement and the
+    gap between high[i-2] and low[i] is non-empty. Bearish: mirror.
+    Columns are populated only on bar i (the 3rd candle).
+    """
+    out = df.copy()
+    n = len(out)
+    high = out["high"].to_numpy()
+    low = out["low"].to_numpy()
+    bull_disp = out.get("is_bull_disp", pd.Series([False] * n)).to_numpy()
+    bear_disp = out.get("is_bear_disp", pd.Series([False] * n)).to_numpy()
+
+    min_size = min_size_pips * pip_size
+    bull_top = np.full(n, np.nan)
+    bull_bot = np.full(n, np.nan)
+    bull_mid = np.full(n, np.nan)
+    bear_top = np.full(n, np.nan)
+    bear_bot = np.full(n, np.nan)
+    bear_mid = np.full(n, np.nan)
+
+    for i in range(2, n):
+        if bull_disp[i - 1]:
+            gb = high[i - 2]
+            gt = low[i]
+            if gt - gb >= min_size:
+                bull_top[i] = gt
+                bull_bot[i] = gb
+                bull_mid[i] = (gb + gt) / 2.0
+        if bear_disp[i - 1]:
+            gb = high[i]
+            gt = low[i - 2]
+            if gt - gb >= min_size:
+                bear_top[i] = gt
+                bear_bot[i] = gb
+                bear_mid[i] = (gb + gt) / 2.0
+
+    out["fvg_bull_top"] = bull_top
+    out["fvg_bull_bot"] = bull_bot
+    out["fvg_bull_mid"] = bull_mid
+    out["fvg_bear_top"] = bear_top
+    out["fvg_bear_bot"] = bear_bot
+    out["fvg_bear_mid"] = bear_mid
+    out["fvg_bull_size_pips"] = (bull_top - bull_bot) / pip_size
+    out["fvg_bear_size_pips"] = (bear_top - bear_bot) / pip_size
+    return out
+
+
+# ---------- Kill zones ----------
+
+def add_kill_zones(df: pd.DataFrame) -> pd.DataFrame:
+    """Flag each bar with the active NY-time kill zone (or empty string)."""
+    out = df.copy()
+    ny_local = out["datetime"].dt.tz_convert(pytz.timezone(NY_TZ))
+    h = ny_local.dt.hour + ny_local.dt.minute / 60.0
+    out["kz_london"] = (h >= 3.0) & (h < 4.0)
+    out["kz_ny"] = (h >= 10.0) & (h < 11.0)
+    out["kz_ny_pm"] = (h >= 14.0) & (h < 15.0)
+    kz = np.where(
+        out["kz_london"], "london",
+        np.where(out["kz_ny"], "ny", np.where(out["kz_ny_pm"], "ny_pm", "")),
+    )
+    out["kill_zone"] = kz
+    return out
+
+
+# ---------- HTF bias ----------
+
+def add_htf_bias(df: pd.DataFrame, lookback_hours: int = 10) -> pd.DataFrame:
+    """Resample to 1H, compute bullish/bearish bias from last N hourly bars,
+    broadcast back to the 5m grid.
+
+    Bullish: at least 6 of last N hourly bars show higher highs AND at
+    least 5 show higher lows. Mirror for bearish. Otherwise neutral.
+    """
+    out = df.copy()
+    work = out.set_index("datetime")[["open", "high", "low", "close"]]
+    hourly = work.resample("1h").agg({
+        "open": "first", "high": "max", "low": "min", "close": "last",
+    }).dropna()
+
+    if hourly.empty:
+        out["htf_bias"] = "neutral"
+        return out
+
+    hh_flag = (hourly["high"] > hourly["high"].shift(1)).astype(int)
+    lh_flag = (hourly["high"] < hourly["high"].shift(1)).astype(int)
+    hl_flag = (hourly["low"] > hourly["low"].shift(1)).astype(int)
+    ll_flag = (hourly["low"] < hourly["low"].shift(1)).astype(int)
+
+    min_periods = max(3, lookback_hours // 2)
+    hh = hh_flag.rolling(lookback_hours, min_periods=min_periods).sum()
+    lh = lh_flag.rolling(lookback_hours, min_periods=min_periods).sum()
+    hl = hl_flag.rolling(lookback_hours, min_periods=min_periods).sum()
+    ll = ll_flag.rolling(lookback_hours, min_periods=min_periods).sum()
+
+    bullish = (hh >= 6) & (hl >= 5)
+    bearish = (ll >= 6) & (lh >= 5)
+    bias = pd.Series("neutral", index=hourly.index, dtype=object)
+    bias[bullish] = "bullish"
+    bias[bearish] = "bearish"
+    # Convert both sides to naive UTC for the asof merge (pandas requires
+    # matching tz-dtypes).
+    bias_index_utc = pd.DatetimeIndex(bias.index).tz_convert("UTC").tz_localize(None)
+    bias_df = pd.DataFrame({
+        "hour_ts": bias_index_utc,
+        "htf_bias": bias.values,
+    }).sort_values("hour_ts")
+
+    ts_utc_naive = pd.DatetimeIndex(out["datetime"]).tz_convert("UTC").tz_localize(None)
+    left = pd.DataFrame({
+        "_i": np.arange(len(out)),
+        "ts": ts_utc_naive,
+    }).sort_values("ts")
+    merged = pd.merge_asof(
+        left, bias_df,
+        left_on="ts", right_on="hour_ts",
+        direction="backward",
+    )
+    merged = merged.sort_values("_i")
+    out["htf_bias"] = merged["htf_bias"].fillna("neutral").values
+    return out
+
+
+# ---------- Candle patterns (minimal — optional entry confirmation) ----------
+
 def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    """Detect candlestick patterns usable as entry confirmation triggers."""
     out = df.copy()
     body = (out["close"] - out["open"]).abs()
     candle_range = (out["high"] - out["low"]).replace(0, np.nan)
     upper_wick = out["high"] - out[["open", "close"]].max(axis=1)
     lower_wick = out[["open", "close"]].min(axis=1) - out["low"]
-
     bullish = out["close"] > out["open"]
     bearish = out["close"] < out["open"]
-
     prev_open = out["open"].shift(1)
     prev_close = out["close"].shift(1)
-    prev_high = out["high"].shift(1)
-    prev_low = out["low"].shift(1)
     prev_body = (prev_close - prev_open).abs()
-    prev_mid = (prev_open + prev_close) / 2.0
 
     out["bullish_engulfing"] = (
         bullish & (prev_close < prev_open) & (body > prev_body)
@@ -190,23 +279,6 @@ def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
     out["bearish_engulfing"] = (
         bearish & (prev_close > prev_open) & (body > prev_body)
         & (out["close"] < prev_open) & (out["open"] > prev_close)
-    ).fillna(False)
-    out["hammer"] = (
-        bullish & (lower_wick >= 2 * body) & (upper_wick <= body) & (body > 0)
-    ).fillna(False)
-    out["shooting_star"] = (
-        bearish & (upper_wick >= 2 * body) & (lower_wick <= body) & (body > 0)
-    ).fillna(False)
-    out["doji"] = ((body / candle_range) < 0.1).fillna(False)
-    out["piercing_line"] = (
-        bullish & (prev_close < prev_open)
-        & (out["open"] < out["low"].shift(1))
-        & (out["close"] > prev_mid) & (out["close"] < prev_open)
-    ).fillna(False)
-    out["dark_cloud_cover"] = (
-        bearish & (prev_close > prev_open)
-        & (out["open"] > out["high"].shift(1))
-        & (out["close"] < prev_mid) & (out["close"] > prev_open)
     ).fillna(False)
     body_ratio = (body / candle_range).fillna(0.0)
     out["bullish_marubozu"] = (
@@ -217,28 +289,35 @@ def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
         bearish & (body_ratio >= 0.8)
         & ((lower_wick / candle_range).fillna(0.0) <= 0.1)
     ).fillna(False)
-    inside = (out["high"] < prev_high) & (out["low"] > prev_low)
-    out["inside_bar_bull"] = inside.fillna(False)
-    out["inside_bar_bear"] = inside.fillna(False)
     return out
 
 
+# ---------- Orchestrator ----------
+
 def build_indicator_frame(
     df: pd.DataFrame,
-    rsi_fast: int = 2,
-    rsi_medium: int = 3,
-    rsi_slow: int = 14,
-    bb_period: int = 20,
-    bb_std: float = 2.0,
-    adx_period: int = 14,
-    vwap_tz: str = "America/New_York",
+    pip_size: float = 0.0001,
+    swing_lookback: int = 5,
+    displacement_body_pips: float = 8.0,
+    displacement_close_pct: float = 0.70,
+    min_fvg_size_pips: float = 3.0,
+    htf_lookback_hours: int = 10,
 ) -> pd.DataFrame:
-    """Attach all indicators used by the RSI Mean-Reversion strategy."""
-    out = add_rsi(df, fast=rsi_fast, medium=rsi_medium, slow=rsi_slow)
-    out = add_bollinger(out, period=bb_period, std=bb_std)
-    out = add_adx(out, period=adx_period)
-    out = add_vwap_bands(out, tz=vwap_tz)
-    out = add_prev_day_levels(out, tz=vwap_tz)
-    out = add_london_session_levels(out)
+    """Attach all Silver Bullet indicators."""
+    if not isinstance(df["datetime"].dtype, pd.DatetimeTZDtype):
+        raise ValueError("build_indicator_frame requires timezone-aware datetimes")
+    out = df
+    out = add_swings(out, lookback=swing_lookback)
+    out = add_prev_day_levels(out, tz=NY_TZ)
+    out = add_prev_session_levels(out)
+    out = add_displacement(
+        out,
+        min_body_pips=displacement_body_pips,
+        pip_size=pip_size,
+        close_pct=displacement_close_pct,
+    )
+    out = add_fvg(out, pip_size=pip_size, min_size_pips=min_fvg_size_pips)
+    out = add_kill_zones(out)
+    out = add_htf_bias(out, lookback_hours=htf_lookback_hours)
     out = add_candle_patterns(out)
     return out

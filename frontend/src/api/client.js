@@ -35,11 +35,6 @@ export async function getOptimizeOptions() {
   return res.data
 }
 
-export async function getPatterns() {
-  const res = await api.get('/backtest/patterns')
-  return res.data
-}
-
 export async function runOptimize(payload) {
   const res = await api.post('/backtest/optimize', payload)
   return res.data

@@ -1,4 +1,4 @@
-"""Pydantic request/response schemas for the API layer."""
+"""Pydantic request/response schemas for the ICT Silver Bullet API."""
 
 from __future__ import annotations
 
@@ -7,65 +7,74 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-ENTRY_TYPES = {"retest_only", "midpoint_only", "retest_then_midpoint"}
-
-ALLOWED_CONFIRMATION_PATTERNS = {
-    "engulfing", "marubozu", "hammer_star", "inside_bar", "piercing_cloud", "doji",
-}
+ALLOWED_STOP_TYPES = {"Beyond sweep", "Beyond FVG", "Fixed pips"}
+ALLOWED_FVG_ENTRY_TYPES = {"50% midpoint", "FVG touch", "FVG close"}
+ALLOWED_HTF_NEUTRAL = {"Skip trade", "Allow both"}
 
 
 class StrategyParamsSchema(BaseModel):
-    """DR / IDR breakout-retest strategy parameters."""
+    """ICT Silver Bullet strategy parameters."""
 
-    # Instrument
+    # Instrument / sizing
     pip_size: float = Field(0.0001, gt=0.0)
-
-    # Sizing / risk
     starting_capital: float = Field(10_000.0, gt=0.0)
     risk_per_trade_pct: float = Field(1.0, gt=0.0, le=100.0)
 
-    # DR window
-    dr_start_time: str = "09:30"
-    dr_end_time: str = "10:30"
-    dr_timezone: str = "America/New_York"
-    min_dr_range_pips: float = Field(15.0, ge=0.0, le=500.0)
-    max_dr_range_pips: float = Field(70.0, gt=0.0, le=1000.0)
+    # Kill zones (NY-time windows)
+    enable_london_sb: bool = True
+    enable_ny_sb: bool = True
+    enable_ny_pm_sb: bool = False
 
-    # Entry
-    entry_type: str = Field("retest_then_midpoint")
-    retest_tolerance_pips: float = Field(5.0, ge=0.0, le=100.0)
-    require_confirmation_candle: bool = True
-    confirmation_patterns: list[str] = Field(
-        default_factory=lambda: ["marubozu", "engulfing"],
-    )
+    # Liquidity detection
+    swing_lookback: int = Field(5, ge=3, le=10)
+    equal_level_tolerance_pips: float = Field(3.0, ge=0.0, le=25.0)
+    min_sweep_pips: float = Field(3.0, ge=0.5, le=30.0)
+    sweep_confirmation_candles: int = Field(3, ge=1, le=10)
 
-    # Time limits
-    retest_window_minutes: int = Field(90, ge=1, le=600)
-    last_entry_time: str = "13:00"
+    # Displacement
+    displacement_body_pips: float = Field(8.0, ge=2.0, le=60.0)
+    displacement_close_pct: float = Field(0.70, ge=0.5, le=1.0)
+
+    # FVG
+    min_fvg_size_pips: float = Field(3.0, ge=0.5, le=30.0)
+    fvg_max_age_candles: int = Field(20, ge=3, le=100)
+    fvg_entry_type: str = Field("50% midpoint")
+
+    # MSS
+    require_mss: bool = True
+
+    # Order block
+    require_ob_confluence: bool = False
+
+    # HTF bias
+    require_htf_alignment: bool = True
+    htf_neutral_action: str = Field("Skip trade")
 
     # Risk / exits
-    stop_type: str = Field("dr_range")  # "dr_range" | "buffer_only"
-    stop_buffer_pips: float = Field(3.0, ge=0.0, le=100.0)
+    stop_type: str = Field("Beyond sweep")
+    stop_buffer_pips: float = Field(3.0, ge=0.0, le=30.0)
+    fixed_stop_pips: float = Field(10.0, ge=2.0, le=100.0)
+    rr_ratio: float = Field(2.0, ge=0.5, le=10.0)
     use_partial_tp: bool = True
-    partial_tp_1_mult: float = Field(0.5, gt=0.0, le=5.0)
-    partial_tp_2_mult: float = Field(1.0, gt=0.0, le=5.0)
-    partial_tp_pct: float = Field(50.0, gt=0.0, lt=100.0)
-    move_be_after_t1: bool = True
-    max_trades_per_day: int = Field(1, ge=1, le=10)
-    max_profit_r: float = Field(2.5, ge=0.0, le=20.0)
+    max_trades_per_killzone: int = Field(1, ge=1, le=5)
+    max_trades_per_day: int = Field(2, ge=1, le=10)
+    close_at_killzone_end: bool = True
+
+    # Confluence filter
+    min_confluence_score: int = Field(5, ge=4, le=10)
+
+    # Filters
+    enable_news_filter: bool = True
+    custom_skip_dates: list[str] = Field(default_factory=list)
+    allowed_days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
+    min_fvg_to_stop_ratio: float = Field(0.5, ge=0.1, le=2.0)
+    spread_pips: float = Field(0.2, ge=0.0, le=5.0)
 
     # Circuit breakers
     enable_daily_circuit_breaker: bool = True
     daily_loss_limit_pct: float = Field(2.0, ge=0.0, le=100.0)
     enable_weekly_circuit_breaker: bool = True
     weekly_loss_limit_pct: float = Field(5.0, ge=0.0, le=100.0)
-
-    # News filter
-    enable_news_filter: bool = True
-    custom_skip_dates: list[str] = Field(default_factory=list)
-
-    # Day filter (0 = Mon … 4 = Fri)
-    allowed_days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
 
 
 class TwelveDataRequest(BaseModel):
@@ -126,4 +135,13 @@ class BacktestResponse(BaseModel):
     monthly_breakdown: list[dict]
     dow_breakdown: list[dict]
     hourly_breakdown: list[dict]
+    kill_zone_breakdown: list[dict]
+    sweep_type_breakdown: list[dict]
+    fvg_size_breakdown: list[dict]
+    confluence_breakdown: list[dict]
+    htf_bias_breakdown: list[dict]
+    entry_time_breakdown: list[dict]
+    direction_breakdown: list[dict]
+    mss_breakdown: list[dict]
     candles: list[dict]
+    diagnostics: dict

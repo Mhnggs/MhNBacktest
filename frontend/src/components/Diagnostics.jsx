@@ -21,48 +21,24 @@ function pct(num, denom) {
   return `${((num / denom) * 100).toFixed(1)}%`
 }
 
-function fmtTime(iso) {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return '—'
-  return d.toISOString().slice(11, 16) + 'Z'
-}
-
-function BiasSampleList({ title, rows, showTouch }) {
-  if (!rows || rows.length === 0) return null
+function FunnelRow({ label, value, of, hint }) {
+  const bar = of > 0 ? Math.min(100, (value / of) * 100) : 0
   return (
-    <div className="mt-1">
-      <div className="text-[11px] text-gray-400">{title}</div>
-      <ul className="font-mono text-[11px] text-gray-300 space-y-0.5">
-        {rows.map((r, i) => (
-          <li key={i} className="flex items-center gap-2">
-            <span className="text-gray-200">{r.date}</span>
-            <span className={r.direction === 'bull' ? 'text-good' : 'text-bad'}>
-              {r.direction}
-            </span>
-            <span className="text-gray-500">brk {fmtTime(r.breakout_time)}</span>
-            {showTouch && r.opposite_touch_time && (
-              <span className="text-gray-500">→ {fmtTime(r.opposite_touch_time)}</span>
-            )}
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-
-function BiasSamples({ bias }) {
-  const held = bias?.held_days_sample
-  const failed = bias?.failed_days_sample
-  if ((!held || held.length === 0) && (!failed || failed.length === 0)) return null
-  return (
-    <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-border/60 pt-2">
-      <BiasSampleList title="Held samples (opposite NOT taken)" rows={held} />
-      <BiasSampleList
-        title="Failed samples (opposite WAS taken)"
-        rows={failed}
-        showTouch
-      />
+    <div className="grid grid-cols-[1fr_80px_60px] gap-2 items-center">
+      <div className="text-gray-300" title={hint || ''}>{label}</div>
+      <div className="bg-border h-1.5 rounded-full overflow-hidden">
+        <div
+          className="h-full"
+          style={{
+            width: `${bar}%`,
+            background: bar > 50 ? '#22c55e' : bar > 20 ? '#eab308' : '#ef4444',
+          }}
+        />
+      </div>
+      <div className="text-right font-mono text-gray-300">
+        {value}
+        <span className="text-gray-500 text-[10px] ml-1">({pct(value, of)})</span>
+      </div>
     </div>
   )
 }
@@ -71,107 +47,83 @@ export default function Diagnostics() {
   const results = useBacktestStore((s) => s.results)
   if (!results) return null
   const d = results.diagnostics || {}
-  const bias = results.dr_directional_bias || {}
-  const entries = d.entries_via_retest || 0
-  const midEntries = d.entries_via_midpoint || 0
-  const breakouts = d.days_with_breakout || 0
-  const validDays = d.valid_dr_days || 0
-  const totalDays = d.total_days_seen || 0
-  const newsByType = d.news_skips_by_type || {}
-
-  // Backend returns *_held_pct already as 0-100.
-  const biasOverall = bias.overall_held_pct
-  const biasTone = biasOverall == null
-    ? 'muted'
-    : biasOverall >= 70
-    ? 'good'
-    : biasOverall >= 55
-    ? 'warn'
-    : 'bad'
+  const funnel = d.setup_funnel || {}
+  const kzBars = funnel.kill_zone_bars || 0
 
   return (
     <div className="card text-xs space-y-3">
-      <h2 className="text-sm font-semibold text-gray-200">Diagnostics</h2>
+      <h2 className="text-sm font-semibold text-gray-200">Setup Funnel</h2>
 
-      <div>
-        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
-          DR Directional Bias <span className="text-gray-400 normal-case">
-            (opposite side holds after break)
-          </span>
+      {kzBars === 0 ? (
+        <div className="text-gray-500 italic">
+          No kill-zone bars in this range. Enable a kill zone and/or widen the date window.
         </div>
-        {bias.overall_days ? (
-          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-            <Stat
-              label="Overall hold rate"
-              value={`${biasOverall.toFixed(1)}% (${bias.overall_held}/${bias.overall_days})`}
-              tone={biasTone}
-            />
-            <Stat
-              label="Bull breaks → low held"
-              value={`${(bias.bull_held_pct ?? 0).toFixed(1)}% (${bias.bull_held}/${bias.bull_break_days})`}
-            />
-            <Stat
-              label="Bear breaks → high held"
-              value={`${(bias.bear_held_pct ?? 0).toFixed(1)}% (${bias.bear_held}/${bias.bear_break_days})`}
-            />
-          </div>
-        ) : (
-          <div className="text-gray-500 italic">No breakout days yet — run a longer window.</div>
-        )}
-        <div className="text-[11px] text-gray-500 mt-1 leading-relaxed">
-          Opposite side = wick within 2 pips of the opposite DR level between
-          breakout and 16:00 NY. Classic claim is ~70%; 60-75% validates the
-          edge on your dataset.
-        </div>
-        <BiasSamples bias={bias} />
-      </div>
-
-      <div className="border-t border-border pt-2">
-        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Day funnel</div>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-          <Stat label="Days seen" value={totalDays} />
-          <Stat label="Valid DR days" value={`${validDays} (${pct(validDays, totalDays)})`} />
-          <Stat label="Skipped — narrow" value={d.days_skipped_narrow || 0} />
-          <Stat label="Skipped — wide" value={d.days_skipped_wide || 0} />
-          <Stat label="Skipped — news" value={d.days_skipped_news || 0} />
-          <Stat label="Skipped — day of week" value={d.days_skipped_day_of_week || 0} />
-        </div>
-        {(newsByType.NFP || newsByType.FOMC || newsByType.CPI) ? (
-          <div className="text-[11px] text-gray-500 mt-1">
-            News breakdown: NFP {newsByType.NFP || 0} · FOMC {newsByType.FOMC || 0} · CPI {newsByType.CPI || 0}
-          </div>
-        ) : null}
-      </div>
-
-      <div className="border-t border-border pt-2">
-        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Breakouts</div>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-          <Stat label="Days with breakout" value={`${breakouts} (${pct(breakouts, validDays)})`} />
-          <Stat label="Bull breaks" value={d.bull_breakouts || 0} tone="good" />
-          <Stat label="Bear breaks" value={d.bear_breakouts || 0} tone="bad" />
-          <Stat
-            label="Avg breakout → entry"
-            value={d.avg_breakout_to_entry_minutes != null
-              ? `${d.avg_breakout_to_entry_minutes.toFixed(1)} min`
-              : '—'}
+      ) : (
+        <div className="space-y-1.5">
+          <FunnelRow
+            label="Kill-zone bars"
+            value={funnel.kill_zone_bars || 0}
+            of={funnel.kill_zone_bars || 0}
+            hint="Bars inside an enabled kill zone (before filtering)"
+          />
+          <FunnelRow
+            label="Sweeps detected"
+            value={funnel.sweeps || 0}
+            of={funnel.kill_zone_bars || 0}
+            hint="Liquidity sweeps confirmed during a kill zone"
+          />
+          <FunnelRow
+            label="After displacement"
+            value={funnel.displacements || 0}
+            of={funnel.sweeps || 0}
+            hint="Sweeps that produced a displacement bar"
+          />
+          <FunnelRow
+            label="After FVG formed"
+            value={funnel.fvgs || 0}
+            of={funnel.displacements || 0}
+            hint="Displacements that produced a valid FVG"
+          />
+          <FunnelRow
+            label="After MSS confirmed"
+            value={funnel.mss || 0}
+            of={funnel.fvgs || 0}
+            hint="FVGs that also saw a market-structure shift"
+          />
+          <FunnelRow
+            label="After HTF aligned"
+            value={funnel.htf_aligned || 0}
+            of={funnel.mss || funnel.fvgs || 0}
+            hint="Setups that matched the 1H bias"
+          />
+          <FunnelRow
+            label="Trades taken"
+            value={funnel.entries_taken || 0}
+            of={funnel.kill_zone_bars || 0}
+            hint="Actual entries taken after all filters"
           />
         </div>
-      </div>
+      )}
 
       <div className="border-t border-border pt-2">
-        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Entries</div>
+        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Skip reasons</div>
         <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-          <Stat label="Via DR retest" value={entries} tone="good" />
-          <Stat label="Via midpoint retest" value={midEntries} />
-          <Stat label="No retest within window" value={d.days_no_retest || 0} />
-          <Stat label="Past last-entry cutoff" value={d.days_past_last_entry || 0} />
+          <Stat label="Daily trade limit" value={d.skipped_daily_limit || 0} />
+          <Stat label="Kill-zone limit" value={d.skipped_killzone_limit || 0} />
+          <Stat label="Low confluence" value={d.skipped_low_confluence || 0} tone="warn" />
+          <Stat label="FVG mitigated" value={d.skipped_fvg_mitigated || 0} />
+          <Stat label="R:R too thin" value={d.skipped_r_ratio || 0} />
+          <Stat label="News day" value={d.skipped_news || 0} />
+          <Stat label="Wrong day of week" value={d.skipped_wrong_day || 0} />
+          <Stat label="Open trade" value={d.skipped_open_trade || 0} />
+          <Stat label="Circuit breaker" value={d.skipped_circuit_breaker || 0} tone="bad" />
         </div>
       </div>
 
       {results.trades?.length === 0 && (
         <div className="border-t border-border pt-2 text-[11px] text-warn leading-relaxed">
-          Zero trades. Common fixes: widen DR range band, relax retest tolerance,
-          extend retest window, disable confirmation candle, or allow more days.
+          Zero trades. Common fixes: lower min_sweep_pips, lower displacement_body_pips,
+          reduce min_confluence_score, or disable MSS / HTF filters.
         </div>
       )}
     </div>

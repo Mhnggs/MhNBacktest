@@ -125,8 +125,8 @@ export default function FindRobust() {
 
   const [options, setOptions] = useState([])
   const [axes, setAxes] = useState([
-    { key: 'min_dr_range_pips', start: 10, end: 25, step: 5 },
-    { key: 'retest_tolerance_pips', start: 2, end: 8, step: 2 },
+    { key: 'min_sweep_pips', start: 2, end: 8, step: 2 },
+    { key: 'displacement_body_pips', start: 4, end: 12, step: 2 },
   ])
   const [metric, setMetric] = useState('sharpe_ratio')
   const [trainPct, setTrainPct] = useState(0.7)

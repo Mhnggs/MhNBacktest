@@ -9,9 +9,14 @@ const TABS = [
   { key: 'monthly', label: 'Monthly' },
   { key: 'dow', label: 'Day of Week' },
   { key: 'hourly', label: 'Hour' },
-  { key: 'dr_range', label: 'DR Range' },
+  { key: 'kill_zone', label: 'Kill Zone' },
+  { key: 'sweep_type', label: 'Sweep Type' },
+  { key: 'fvg_size', label: 'FVG Size' },
+  { key: 'confluence', label: 'Confluence' },
+  { key: 'htf_bias', label: 'HTF Bias' },
   { key: 'entry_time', label: 'Entry Time' },
-  { key: 'entry_type', label: 'Entry Type' },
+  { key: 'mss', label: 'MSS' },
+  { key: 'direction', label: 'Direction' },
 ]
 
 function fmtMoney(v) {
@@ -95,14 +100,21 @@ export default function Breakdowns() {
     monthly: { rows: results.monthly_breakdown, x: 'month', labelKey: 'month' },
     dow: { rows: results.dow_breakdown, x: 'dow', labelKey: 'dow' },
     hourly: { rows: hourly24, x: 'hour', labelKey: 'hour' },
-    dr_range: { rows: results.dr_range_breakdown || [], x: 'bucket', labelKey: 'bucket' },
-    entry_time: { rows: results.dr_entry_time_breakdown || [], x: 'bucket', labelKey: 'bucket' },
-    entry_type: { rows: results.dr_entry_type_breakdown || [], x: 'entry_type', labelKey: 'entry_type' },
+    kill_zone: { rows: results.kill_zone_breakdown || [], x: 'kill_zone', labelKey: 'kill_zone' },
+    sweep_type: { rows: results.sweep_type_breakdown || [], x: 'sweep_type', labelKey: 'sweep_type' },
+    fvg_size: { rows: results.fvg_size_breakdown || [], x: 'bucket', labelKey: 'bucket' },
+    confluence: { rows: results.confluence_breakdown || [], x: 'score', labelKey: 'score' },
+    htf_bias: { rows: results.htf_bias_breakdown || [], x: 'bias', labelKey: 'bias' },
+    entry_time: { rows: results.entry_time_breakdown || [], x: 'bucket', labelKey: 'bucket' },
+    mss: { rows: results.mss_breakdown || [], x: 'bucket', labelKey: 'bucket' },
+    direction: { rows: results.direction_breakdown || [], x: 'direction', labelKey: 'direction' },
   }
   const { rows, x, labelKey } = dataMap[tab]
   const sessionMarkers = results.session_markers || []
-
-  const tableTabs = new Set(['dr_range', 'entry_time', 'entry_type'])
+  const tableTabs = new Set([
+    'kill_zone', 'sweep_type', 'fvg_size', 'confluence',
+    'htf_bias', 'entry_time', 'mss', 'direction',
+  ])
 
   return (
     <div className="card">
@@ -146,11 +158,13 @@ export default function Breakdowns() {
             <ReferenceLine
               key={i}
               x={m.hour}
-              stroke={m.label.toLowerCase().includes('start') ? '#22d3ee'
-                : m.label.toLowerCase().includes('last entry') ? '#f97316'
-                : '#a855f7'}
+              stroke={
+                m.label.includes('London') ? '#facc15'
+                : m.label.includes('PM') ? '#a855f7'
+                : '#3b82f6'
+              }
               strokeDasharray="4 4"
-              label={{ value: m.label, fill: '#9ca3af', fontSize: 10, position: 'insideTop' }}
+              label={{ value: m.label, fill: '#9ca3af', fontSize: 9, position: 'insideTop' }}
             />
           ))}
           <Bar dataKey="pnl">
@@ -178,7 +192,12 @@ export default function Breakdowns() {
             <thead className="text-gray-400 border-b border-border">
               <tr>
                 <th className="text-left py-1.5 px-2">
-                  {tab === 'entry_type' ? 'Entry Type' : 'Bucket'}
+                  {tab === 'kill_zone' ? 'Kill Zone'
+                   : tab === 'sweep_type' ? 'Sweep Type'
+                   : tab === 'confluence' ? 'Score'
+                   : tab === 'htf_bias' ? 'HTF Bias'
+                   : tab === 'direction' ? 'Direction'
+                   : 'Bucket'}
                 </th>
                 <th className="text-right py-1.5 px-2">Trades</th>
                 <th className="text-right py-1.5 px-2">W / L</th>
@@ -226,9 +245,9 @@ export default function Breakdowns() {
           <span className="flex items-center gap-1"><span className="w-2 h-2" style={{background: '#22c55e'}} /> 50–60%</span>
           <span className="flex items-center gap-1"><span className="w-2 h-2" style={{background: '#eab308'}} /> 40–50%</span>
           <span className="flex items-center gap-1"><span className="w-2 h-2" style={{background: '#ef4444'}} /> {'<40% WR'}</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-cyan-400" /> DR start</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-purple-500" /> DR end</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-orange-400" /> last entry</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-yellow-400" /> London SB</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-blue-500" /> NY SB</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-purple-400" /> NY PM SB</span>
         </div>
       )}
     </div>

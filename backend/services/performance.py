@@ -1,4 +1,4 @@
-"""Performance metrics: Sharpe, drawdown, win rate, profit factor, breakdowns."""
+"""Performance metrics and breakdowns for the Silver Bullet strategy."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def _safe_div(a: float, b: float) -> float:
 
 def compute_stats(trades: list[dict], equity_curve: list[dict], starting_capital: float) -> dict:
     if not trades:
-        return _empty_stats(starting_capital, equity_curve)
+        return _empty_stats(starting_capital)
 
     df = pd.DataFrame(trades)
     df["entry_time"] = pd.to_datetime(df["entry_time"])
@@ -41,7 +41,7 @@ def compute_stats(trades: list[dict], equity_curve: list[dict], starting_capital
     else:
         max_dd = 0.0
 
-    daily_returns = _daily_returns(equity_curve, starting_capital)
+    daily_returns = _daily_returns(equity_curve)
     sharpe = _sharpe(daily_returns)
 
     durations = (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60.0
@@ -69,7 +69,7 @@ def compute_stats(trades: list[dict], equity_curve: list[dict], starting_capital
     }
 
 
-def _empty_stats(starting_capital: float, equity_curve: list[dict]) -> dict:
+def _empty_stats(starting_capital: float) -> dict:
     return {
         "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
         "avg_win": 0.0, "avg_loss": 0.0, "profit_factor": 0.0,
@@ -98,7 +98,7 @@ def _streaks(pnls: Iterable[float]) -> tuple[int, int]:
     return win_max, loss_max
 
 
-def _daily_returns(equity_curve: list[dict], starting_capital: float) -> pd.Series:
+def _daily_returns(equity_curve: list[dict]) -> pd.Series:
     if not equity_curve:
         return pd.Series(dtype=float)
     df = pd.DataFrame(equity_curve)
@@ -115,6 +115,8 @@ def _sharpe(returns: pd.Series, periods_per_year: int = 252) -> float:
         return 0.0
     return float(returns.mean() / returns.std() * np.sqrt(periods_per_year))
 
+
+# ------------------------- bucket utilities -------------------------
 
 def _bucket_row(label_key: str, label: str, sub: pd.DataFrame) -> dict:
     n = int(len(sub))
@@ -141,6 +143,8 @@ def _bucket_row(label_key: str, label: str, sub: pd.DataFrame) -> dict:
         "profit_factor": _safe_div(gross_profit, gross_loss),
     }
 
+
+# ------------------------- generic breakdowns -------------------------
 
 def monthly_breakdown(trades: list[dict]) -> list[dict]:
     if not trades:
@@ -175,7 +179,7 @@ def dow_breakdown(trades: list[dict]) -> list[dict]:
     return grouped.to_dict("records")
 
 
-def hourly_breakdown(trades: list[dict], timezone: str = "UTC") -> list[dict]:
+def hourly_breakdown(trades: list[dict], timezone: str = "America/New_York") -> list[dict]:
     if not trades:
         return []
     df = pd.DataFrame(trades)
@@ -196,113 +200,134 @@ def hourly_breakdown(trades: list[dict], timezone: str = "UTC") -> list[dict]:
     return grouped.to_dict("records")
 
 
-LEVEL_TYPE_ORDER = [
-    "prev_day_high", "prev_day_low", "prev_day_open", "prev_day_close",
-    "vwap", "vwap_upper_1", "vwap_upper_2", "vwap_lower_1", "vwap_lower_2",
-    "round_number", "london_high", "london_low",
-    "daily_open", "weekly_open",
+# ------------------------- Silver Bullet breakdowns -------------------------
+
+KILL_ZONE_ORDER = ["london", "ny", "ny_pm"]
+KILL_ZONE_LABELS = {"london": "London SB", "ny": "NY SB", "ny_pm": "NY PM SB"}
+
+SWEEP_TYPE_ORDER = [
+    "EQH", "EQL",
+    "prev_day_high", "prev_day_low",
+    "prev_london_high", "prev_london_low",
+    "prev_ny_high", "prev_ny_low",
 ]
 
+SWEEP_TYPE_LABELS = {
+    "EQH": "Equal Highs",
+    "EQL": "Equal Lows",
+    "prev_day_high": "Prev Day High",
+    "prev_day_low": "Prev Day Low",
+    "prev_london_high": "Prev London H",
+    "prev_london_low": "Prev London L",
+    "prev_ny_high": "Prev NY H",
+    "prev_ny_low": "Prev NY L",
+}
 
-def level_performance_breakdown(trades: list[dict]) -> list[dict]:
-    """Win rate and P&L per structure-level type."""
+
+def kill_zone_breakdown(trades: list[dict]) -> list[dict]:
+    """P&L, win rate, avg duration per kill zone."""
     if not trades:
         return []
     df = pd.DataFrame(trades)
-    if "level_type" not in df.columns:
+    if "kill_zone" not in df.columns:
         return []
     df["pnl"] = df["pnl"].astype(float)
-    rows = [_bucket_row("level_type", name, group) for name, group in df.groupby("level_type")]
-    rows.sort(key=lambda r: LEVEL_TYPE_ORDER.index(r["level_type"]) if r["level_type"] in LEVEL_TYPE_ORDER else 999)
-    return rows
-
-
-RSI_BUCKETS_LONG = [(0, 5), (5, 10), (10, 15), (15, 20), (20, 30)]
-RSI_BUCKETS_SHORT = [(70, 80), (80, 85), (85, 90), (90, 95), (95, 100)]
-
-
-def rsi_bucket_breakdown(trades: list[dict]) -> list[dict]:
-    """Win rate / avg pnl bucketed by RSI value at entry (separately for
-    long-oversold entries and short-overbought entries)."""
-    if not trades:
-        return []
-    df = pd.DataFrame(trades)
-    if "rsi_at_entry" not in df.columns or "direction" not in df.columns:
-        return []
-    df["pnl"] = df["pnl"].astype(float)
-    df["rsi_at_entry"] = pd.to_numeric(df["rsi_at_entry"], errors="coerce")
-
-    longs = df[df["direction"] == "long"]
-    shorts = df[df["direction"] == "short"]
     rows: list[dict] = []
-    for lo, hi in RSI_BUCKETS_LONG:
-        label = f"L RSI {lo}-{hi}"
-        sub = longs[(longs["rsi_at_entry"] >= lo) & (longs["rsi_at_entry"] < hi)]
-        rows.append(_bucket_row("bucket", label, sub))
-    for lo, hi in RSI_BUCKETS_SHORT:
-        label = f"S RSI {lo}-{hi}"
-        sub = shorts[(shorts["rsi_at_entry"] >= lo) & (shorts["rsi_at_entry"] < hi)]
+    for kz in KILL_ZONE_ORDER:
+        sub = df[df["kill_zone"] == kz]
+        row = _bucket_row("kill_zone", KILL_ZONE_LABELS[kz], sub)
+        rows.append(row)
+    return rows
+
+
+def sweep_type_breakdown(trades: list[dict]) -> list[dict]:
+    """Performance by liquidity type that was swept."""
+    if not trades:
+        return []
+    df = pd.DataFrame(trades)
+    if "sweep_level_type" not in df.columns:
+        return []
+    df["pnl"] = df["pnl"].astype(float)
+    rows: list[dict] = []
+    for lt in SWEEP_TYPE_ORDER:
+        sub = df[df["sweep_level_type"] == lt]
+        if len(sub) == 0:
+            continue
+        rows.append(_bucket_row("sweep_type", SWEEP_TYPE_LABELS[lt], sub))
+    return rows
+
+
+FVG_SIZE_BUCKETS = [
+    (0.0, 5.0, "< 5 pips"),
+    (5.0, 10.0, "5-10"),
+    (10.0, 15.0, "10-15"),
+    (15.0, 25.0, "15-25"),
+    (25.0, 1_000.0, "> 25"),
+]
+
+
+def fvg_size_breakdown(trades: list[dict]) -> list[dict]:
+    if not trades:
+        return []
+    df = pd.DataFrame(trades)
+    if "fvg_size_pips" not in df.columns:
+        return []
+    df["pnl"] = df["pnl"].astype(float)
+    df["fvg_size_pips"] = pd.to_numeric(df["fvg_size_pips"], errors="coerce").fillna(0.0)
+    rows: list[dict] = []
+    for lo, hi, label in FVG_SIZE_BUCKETS:
+        sub = df[(df["fvg_size_pips"] >= lo) & (df["fvg_size_pips"] < hi)]
         rows.append(_bucket_row("bucket", label, sub))
     return rows
 
 
-def exit_reason_breakdown(trades: list[dict]) -> list[dict]:
-    """P&L + win rate per exit type (stop / target / rsi / time / eod)."""
+def confluence_breakdown(trades: list[dict]) -> list[dict]:
+    """Win rate + avg PnL by confluence score (4-10)."""
     if not trades:
         return []
     df = pd.DataFrame(trades)
-    if "exit_reason" not in df.columns:
+    if "confluence_score" not in df.columns:
         return []
     df["pnl"] = df["pnl"].astype(float)
-    return [_bucket_row("exit_reason", str(name or "—"), group)
-            for name, group in df.groupby("exit_reason")]
+    df["confluence_score"] = pd.to_numeric(df["confluence_score"], errors="coerce").fillna(0).astype(int)
+    rows: list[dict] = []
+    for score in range(4, 11):
+        sub = df[df["confluence_score"] == score]
+        rows.append(_bucket_row("score", f"Score {score}", sub))
+    return rows
 
 
-BB_WIDTH_BUCKETS = [
-    (0.0, 0.001, "tight (<0.001)"),
-    (0.001, 0.0015, "0.0010-0.0015"),
-    (0.0015, 0.002, "0.0015-0.0020"),
-    (0.002, 0.003, "0.0020-0.0030"),
-    (0.003, 1.0, "wide (>0.003)"),
-]
-
-
-def bb_width_breakdown(trades: list[dict]) -> list[dict]:
-    """Validate trend filter: performance vs Bollinger-band width at entry."""
+def htf_bias_breakdown(trades: list[dict]) -> list[dict]:
+    """Performance by HTF bias when the trade was taken."""
     if not trades:
         return []
     df = pd.DataFrame(trades)
-    if "bb_width_at_entry" not in df.columns:
+    if "htf_bias" not in df.columns:
         return []
     df["pnl"] = df["pnl"].astype(float)
-    df["bb_width_at_entry"] = pd.to_numeric(df["bb_width_at_entry"], errors="coerce")
-    return [_bucket_row("bucket", label,
-                        df[(df["bb_width_at_entry"] >= lo) & (df["bb_width_at_entry"] < hi)])
-            for lo, hi, label in BB_WIDTH_BUCKETS]
+    rows: list[dict] = []
+    for bias in ("bullish", "bearish", "neutral"):
+        sub = df[df["htf_bias"] == bias]
+        rows.append(_bucket_row("bias", bias.title(), sub))
+    return rows
 
 
-def entry_time_breakdown(trades: list[dict], tz: str = "Europe/London") -> list[dict]:
-    """Bucket entries into 30-min windows within the primary session TZ."""
+def entry_time_breakdown(trades: list[dict]) -> list[dict]:
+    """5-minute buckets within kill zones. Helps find the sweetest entry window."""
     if not trades:
         return []
     df = pd.DataFrame(trades)
     df["entry_time"] = pd.to_datetime(df["entry_time"], utc=True)
     try:
-        local = df["entry_time"].dt.tz_convert(tz)
+        local = df["entry_time"].dt.tz_convert("America/New_York")
     except Exception:
         local = df["entry_time"]
-    df["_hhmm"] = local.dt.hour + local.dt.minute / 60.0
     df["pnl"] = df["pnl"].astype(float)
-
-    buckets = [(h, h + 0.5, f"{int(h):02d}:{'00' if h % 1 == 0 else '30'}") for h in
-               [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5,
-                9.0, 9.5, 10.0, 10.5, 11.0, 11.5,
-                15.0, 15.5, 16.0, 16.5]]
-    rows = []
-    for lo, hi, label in buckets:
-        sub = df[(df["_hhmm"] >= lo) & (df["_hhmm"] < hi)]
-        if len(sub):
-            rows.append(_bucket_row("bucket", label, sub))
+    df["_hhmm"] = local.dt.strftime("%H:%M")
+    rows: list[dict] = []
+    for hhmm, sub in df.groupby("_hhmm"):
+        rows.append(_bucket_row("bucket", hhmm, sub))
+    rows.sort(key=lambda r: r["bucket"])
     return rows
 
 
@@ -314,3 +339,18 @@ def direction_breakdown(trades: list[dict]) -> list[dict]:
         return []
     df["pnl"] = df["pnl"].astype(float)
     return [_bucket_row("direction", str(name), group) for name, group in df.groupby("direction")]
+
+
+def mss_breakdown(trades: list[dict]) -> list[dict]:
+    """With-MSS vs without-MSS performance."""
+    if not trades:
+        return []
+    df = pd.DataFrame(trades)
+    if "mss_confirmed" not in df.columns:
+        return []
+    df["pnl"] = df["pnl"].astype(float)
+    rows: list[dict] = []
+    for flag, label in [(True, "MSS confirmed"), (False, "No MSS")]:
+        sub = df[df["mss_confirmed"].astype(bool) == flag]
+        rows.append(_bucket_row("bucket", label, sub))
+    return rows

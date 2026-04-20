@@ -1,4 +1,4 @@
-"""Backtest execution endpoints."""
+"""Backtest execution endpoints for the ICT Silver Bullet strategy."""
 
 from __future__ import annotations
 
@@ -16,13 +16,17 @@ from ..models.schemas import (
 )
 from ..services.performance import (
     compute_stats,
+    confluence_breakdown,
+    direction_breakdown,
     dow_breakdown,
-    dr_directional_bias,
-    dr_entry_time_breakdown,
-    dr_entry_type_breakdown,
-    dr_range_breakdown,
+    entry_time_breakdown,
+    fvg_size_breakdown,
     hourly_breakdown,
+    htf_bias_breakdown,
+    kill_zone_breakdown,
     monthly_breakdown,
+    mss_breakdown,
+    sweep_type_breakdown,
 )
 from ..services.store import get_dataset
 from ..services.strategy import StrategyParams, run_backtest
@@ -31,7 +35,7 @@ router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 
 def _candles_with_indicators(df: pd.DataFrame, params: "StrategyParams") -> list[dict]:
-    """Attach DR levels + candle patterns and serialize rows for the chart."""
+    """Attach Silver Bullet indicator columns and serialize rows for the chart."""
     from ..services.indicators import build_indicator_frame
 
     work = df.copy()
@@ -43,14 +47,13 @@ def _candles_with_indicators(df: pd.DataFrame, params: "StrategyParams") -> list
         work = work.dropna(subset=["datetime"]).reset_index(drop=True)
     with_ind = build_indicator_frame(
         work,
-        dr_start=params.dr_start_time,
-        dr_end=params.dr_end_time,
-        dr_tz=params.dr_timezone,
+        pip_size=params.pip_size,
+        swing_lookback=params.swing_lookback,
+        displacement_body_pips=params.displacement_body_pips,
+        displacement_close_pct=params.displacement_close_pct,
+        min_fvg_size_pips=params.min_fvg_size_pips,
     )
     with_ind = with_ind.replace([np.inf, -np.inf], np.nan)
-    # Drop helper column that's not JSON-serializable.
-    if "_dr_date" in with_ind.columns:
-        with_ind = with_ind.drop(columns=["_dr_date"])
     serialized = (
         with_ind.assign(datetime=lambda d: d["datetime"].astype(str))
         .to_json(orient="records", date_format="iso")
@@ -76,16 +79,15 @@ def _load_filtered_df(req: BacktestRequest) -> pd.DataFrame:
     return df
 
 
-def _session_markers(params: StrategyParams) -> list[dict]:
-    """DR window markers on the hourly breakdown chart."""
-    def _to_hour(s: str) -> float:
-        h, m = s.split(":")
-        return int(h) + int(m) / 60.0
-
+def _session_markers() -> list[dict]:
+    """Kill-zone boundaries for the hourly breakdown chart (NY time)."""
     return [
-        {"label": "DR start", "hour": _to_hour(params.dr_start_time)},
-        {"label": "DR end", "hour": _to_hour(params.dr_end_time)},
-        {"label": "Last entry", "hour": _to_hour(params.last_entry_time)},
+        {"label": "London SB", "hour": 3.0},
+        {"label": "London SB end", "hour": 4.0},
+        {"label": "NY SB", "hour": 10.0},
+        {"label": "NY SB end", "hour": 11.0},
+        {"label": "NY PM SB", "hour": 14.0},
+        {"label": "NY PM SB end", "hour": 15.0},
     ]
 
 
@@ -95,19 +97,22 @@ def _run_segment(df: pd.DataFrame, params: StrategyParams) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"Backtest failed: {exc}") from exc
     stats = compute_stats(result["trades"], result["equity_curve"], params.starting_capital)
-    day_states = result.get("day_states", [])
+    trades = result["trades"]
     return {
-        "trades": result["trades"],
+        "trades": trades,
         "equity_curve": result["equity_curve"],
         "stats": stats,
-        "monthly_breakdown": monthly_breakdown(result["trades"]),
-        "dow_breakdown": dow_breakdown(result["trades"]),
-        "hourly_breakdown": hourly_breakdown(result["trades"], params.dr_timezone),
-        "dr_range_breakdown": dr_range_breakdown(result["trades"]),
-        "dr_entry_time_breakdown": dr_entry_time_breakdown(result["trades"], params.dr_timezone),
-        "dr_entry_type_breakdown": dr_entry_type_breakdown(result["trades"]),
-        "dr_directional_bias": dr_directional_bias(day_states),
-        "day_states": day_states,
+        "monthly_breakdown": monthly_breakdown(trades),
+        "dow_breakdown": dow_breakdown(trades),
+        "hourly_breakdown": hourly_breakdown(trades, "America/New_York"),
+        "kill_zone_breakdown": kill_zone_breakdown(trades),
+        "sweep_type_breakdown": sweep_type_breakdown(trades),
+        "fvg_size_breakdown": fvg_size_breakdown(trades),
+        "confluence_breakdown": confluence_breakdown(trades),
+        "htf_bias_breakdown": htf_bias_breakdown(trades),
+        "entry_time_breakdown": entry_time_breakdown(trades),
+        "direction_breakdown": direction_breakdown(trades),
+        "mss_breakdown": mss_breakdown(trades),
         "diagnostics": result.get("diagnostics", {}),
     }
 
@@ -122,19 +127,18 @@ def run(req: BacktestRequest):
 
     return {
         **segment,
-        "session_markers": _session_markers(params),
+        "session_markers": _session_markers(),
         "candles": candles,
     }
 
 
 @router.post("/candles")
 def candles(req: BacktestRequest):
-    """Return candles with DR-level overlays for the chart, without running the strategy."""
     df = _load_filtered_df(req)
     params = StrategyParams(**req.params.model_dump())
     return {
         "candles": _candles_with_indicators(df, params),
-        "session_markers": _session_markers(params),
+        "session_markers": _session_markers(),
     }
 
 
@@ -181,14 +185,18 @@ def _consistency_score(train_stats: dict, test_stats: dict) -> dict:
     }
 
 
+# ------------- Optimizer parameter surface -------------
+
 OPTIMIZE_ALLOWED_PARAMS = {
-    "min_dr_range_pips": {"type": float, "label": "Min DR Range (pips)", "min": 5.0, "max": 100.0},
-    "max_dr_range_pips": {"type": float, "label": "Max DR Range (pips)", "min": 20.0, "max": 200.0},
-    "retest_tolerance_pips": {"type": float, "label": "Retest Tolerance (pips)", "min": 0.0, "max": 30.0},
-    "stop_buffer_pips": {"type": float, "label": "Stop Buffer (pips)", "min": 0.0, "max": 30.0},
-    "retest_window_minutes": {"type": int, "label": "Retest Window (min)", "min": 15, "max": 300},
-    "partial_tp_1_mult": {"type": float, "label": "T1 × DR Range", "min": 0.25, "max": 2.0},
-    "partial_tp_2_mult": {"type": float, "label": "T2 × DR Range", "min": 0.5, "max": 3.0},
+    "swing_lookback": {"type": int, "label": "Swing Lookback", "min": 3.0, "max": 10.0},
+    "min_sweep_pips": {"type": float, "label": "Min Sweep (pips)", "min": 0.5, "max": 20.0},
+    "displacement_body_pips": {"type": float, "label": "Displacement Body (pips)", "min": 3.0, "max": 30.0},
+    "min_fvg_size_pips": {"type": float, "label": "Min FVG Size (pips)", "min": 1.0, "max": 20.0},
+    "fvg_max_age_candles": {"type": int, "label": "FVG Max Age (bars)", "min": 3.0, "max": 60.0},
+    "rr_ratio": {"type": float, "label": "R:R Ratio", "min": 0.5, "max": 5.0},
+    "stop_buffer_pips": {"type": float, "label": "Stop Buffer (pips)", "min": 0.0, "max": 15.0},
+    "equal_level_tolerance_pips": {"type": float, "label": "Equal Level Tolerance (pips)", "min": 0.5, "max": 15.0},
+    "min_confluence_score": {"type": int, "label": "Min Confluence Score", "min": 4.0, "max": 10.0},
     "risk_per_trade_pct": {"type": float, "label": "Risk/Trade %", "min": 0.1, "max": 10.0},
 }
 
@@ -205,21 +213,6 @@ def _coerce(name: str, value: float):
     lo, hi = spec["min"], spec["max"]
     value = max(lo, min(hi, value))
     return spec["type"](round(value)) if spec["type"] is int else float(value)
-
-
-PATTERN_OPTIONS = [
-    {"key": "marubozu", "label": "Marubozu"},
-    {"key": "engulfing", "label": "Engulfing"},
-    {"key": "hammer_star", "label": "Hammer / Shooting Star"},
-    {"key": "inside_bar", "label": "Inside Bar"},
-    {"key": "piercing_cloud", "label": "Piercing Line / Dark Cloud Cover"},
-    {"key": "doji", "label": "Doji"},
-]
-
-
-@router.get("/patterns")
-def patterns():
-    return {"patterns": PATTERN_OPTIONS}
 
 
 @router.get("/optimize/options")
@@ -333,7 +326,7 @@ def walkforward(req: WalkForwardRequest):
         "train_bars": int(len(train_df)),
         "test_bars": int(len(test_df)),
         "consistency": consistency,
-        "session_markers": _session_markers(params),
+        "session_markers": _session_markers(),
     }
 
 
@@ -354,12 +347,8 @@ def _tier_rank(tier: str) -> int:
 
 @router.post("/auto_robust")
 def auto_robust(req: AutoRobustRequest):
-    """Sweep → rank by primary metric → walk-forward the top-K → return only
-    the configurations that survived as ROBUST / MARGINAL.
-
-    The user spec: "pick params and ranges, get a ranked table of what
-    actually worked out-of-sample" — no heatmap interpretation required.
-    """
+    """Sweep → rank by primary metric → walk-forward the top-K → return
+    configurations that survived as ROBUST / MARGINAL."""
     if not req.sweeps:
         raise HTTPException(400, "At least one sweep axis is required")
     if len(req.sweeps) > 3:
@@ -388,7 +377,6 @@ def auto_robust(req: AutoRobustRequest):
     df = _load_filtered_df(req)
     base_params = req.params.model_dump()
 
-    # ---- Phase 1: full-period scoring ----
     from itertools import product
 
     candidates: list[dict] = []
@@ -421,7 +409,6 @@ def auto_robust(req: AutoRobustRequest):
     scored.sort(key=lambda c: c["metric_value"], reverse=True)
     top = scored[: req.top_k]
 
-    # ---- Phase 2: walk-forward validation of the top-K ----
     n = len(df)
     split_idx = max(1, min(n - 1, int(n * req.train_pct)))
     train_df = df.iloc[:split_idx].reset_index(drop=True)
@@ -474,8 +461,6 @@ def auto_robust(req: AutoRobustRequest):
             "robust_enough": robust_enough,
         })
 
-    # Re-rank: passing rows (ROBUST then MARGINAL) by test Sharpe desc,
-    # failing rows after them sorted the same way.
     validated.sort(
         key=lambda r: (
             _tier_rank(r.get("consistency", {}).get("tier", "")),
