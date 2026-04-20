@@ -9,7 +9,9 @@ const TABS = [
   { key: 'monthly', label: 'Monthly' },
   { key: 'dow', label: 'Day of Week' },
   { key: 'hourly', label: 'Hour' },
-  { key: 'session', label: 'Session' },
+  { key: 'dr_range', label: 'DR Range' },
+  { key: 'entry_time', label: 'Entry Time' },
+  { key: 'entry_type', label: 'Entry Type' },
 ]
 
 function fmtMoney(v) {
@@ -39,17 +41,18 @@ function DowTooltip({ active, payload }) {
   )
 }
 
-function SessionTooltip({ active, payload }) {
+function GenericTooltip({ active, payload, labelKey }) {
   if (!active || !payload?.length) return null
   const d = payload[0].payload
   return (
     <div className="bg-bg border border-border text-xs p-2">
-      <div className="font-semibold">{d.session}</div>
+      <div className="font-semibold">{d[labelKey]}</div>
       <div>P&L: <span className={d.pnl >= 0 ? 'text-good' : 'text-bad'}>{fmtMoney(d.pnl)}</span></div>
       <div>Win rate: {d.win_rate?.toFixed(1)}%</div>
       <div>Trades: {d.trades} ({d.wins}W / {d.losses}L)</div>
-      <div>Profit factor: {d.profit_factor?.toFixed(2)}</div>
-      <div>Best / Worst: {fmtMoney(d.best)} / {fmtMoney(d.worst)}</div>
+      {d.profit_factor != null && (
+        <div>Profit factor: {d.profit_factor === 0 ? '—' : d.profit_factor.toFixed(2)}</div>
+      )}
     </div>
   )
 }
@@ -89,19 +92,23 @@ export default function Breakdowns() {
   if (!results) return null
 
   const dataMap = {
-    monthly: { rows: results.monthly_breakdown, x: 'month' },
-    dow: { rows: results.dow_breakdown, x: 'dow' },
-    hourly: { rows: hourly24, x: 'hour' },
-    session: { rows: results.session_breakdown || [], x: 'session' },
+    monthly: { rows: results.monthly_breakdown, x: 'month', labelKey: 'month' },
+    dow: { rows: results.dow_breakdown, x: 'dow', labelKey: 'dow' },
+    hourly: { rows: hourly24, x: 'hour', labelKey: 'hour' },
+    dr_range: { rows: results.dr_range_breakdown || [], x: 'bucket', labelKey: 'bucket' },
+    entry_time: { rows: results.dr_entry_time_breakdown || [], x: 'bucket', labelKey: 'bucket' },
+    entry_type: { rows: results.dr_entry_type_breakdown || [], x: 'entry_type', labelKey: 'entry_type' },
   }
-  const { rows, x } = dataMap[tab]
+  const { rows, x, labelKey } = dataMap[tab]
   const sessionMarkers = results.session_markers || []
+
+  const tableTabs = new Set(['dr_range', 'entry_time', 'entry_type'])
 
   return (
     <div className="card">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <h2 className="text-sm font-semibold text-gray-200">Breakdowns</h2>
-        <div className="flex gap-1">
+        <div className="flex gap-1 flex-wrap">
           {TABS.map((t) => (
             <button
               key={t.key}
@@ -113,7 +120,7 @@ export default function Breakdowns() {
           ))}
         </div>
       </div>
-      <ResponsiveContainer width="100%" height={tab === 'dow' || tab === 'session' ? 220 : tab === 'hourly' ? 240 : 180}>
+      <ResponsiveContainer width="100%" height={tab === 'dow' || tableTabs.has(tab) ? 220 : tab === 'hourly' ? 240 : 180}>
         <BarChart data={rows} margin={{ top: 20, right: 20, left: 0, bottom: 20 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
           <XAxis
@@ -130,7 +137,7 @@ export default function Breakdowns() {
             content={
               tab === 'dow' ? <DowTooltip />
               : tab === 'hourly' ? <HourTooltip />
-              : tab === 'session' ? <SessionTooltip />
+              : tableTabs.has(tab) ? <GenericTooltip labelKey={labelKey} />
               : undefined
             }
             contentStyle={{ background: '#0b0f17', border: '1px solid #1f2937', fontSize: 12 }}
@@ -139,7 +146,9 @@ export default function Breakdowns() {
             <ReferenceLine
               key={i}
               x={m.hour}
-              stroke={m.label.includes('start') ? '#22d3ee' : '#a855f7'}
+              stroke={m.label.toLowerCase().includes('start') ? '#22d3ee'
+                : m.label.toLowerCase().includes('last entry') ? '#f97316'
+                : '#a855f7'}
               strokeDasharray="4 4"
               label={{ value: m.label, fill: '#9ca3af', fontSize: 10, position: 'insideTop' }}
             />
@@ -151,7 +160,7 @@ export default function Breakdowns() {
               else fill = r.pnl >= 0 ? '#22c55e' : '#ef4444'
               return <Cell key={i} fill={fill} />
             })}
-            {(tab === 'dow' || tab === 'session') && (
+            {(tab === 'dow' || tableTabs.has(tab)) && (
               <>
                 <LabelList dataKey="win_rate" position="top" fill="#e5e7eb" fontSize={11}
                   formatter={(v) => (v != null ? `${v.toFixed(0)}%` : '')} />
@@ -163,12 +172,14 @@ export default function Breakdowns() {
         </BarChart>
       </ResponsiveContainer>
 
-      {tab === 'session' && (
+      {tableTabs.has(tab) && (
         <div className="overflow-x-auto mt-2">
           <table className="w-full text-xs">
             <thead className="text-gray-400 border-b border-border">
               <tr>
-                <th className="text-left py-1.5 px-2">Session</th>
+                <th className="text-left py-1.5 px-2">
+                  {tab === 'entry_type' ? 'Entry Type' : 'Bucket'}
+                </th>
                 <th className="text-right py-1.5 px-2">Trades</th>
                 <th className="text-right py-1.5 px-2">W / L</th>
                 <th className="text-right py-1.5 px-2">Win %</th>
@@ -180,9 +191,9 @@ export default function Breakdowns() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.session} className="border-b border-border/40">
-                  <td className="px-2 py-1.5 font-semibold">{r.session}</td>
+              {rows.map((r, i) => (
+                <tr key={r[labelKey] || i} className="border-b border-border/40">
+                  <td className="px-2 py-1.5 font-semibold">{r[labelKey]}</td>
                   <td className="px-2 py-1.5 text-right font-mono">{r.trades}</td>
                   <td className="px-2 py-1.5 text-right font-mono">{r.wins}/{r.losses}</td>
                   <td className="px-2 py-1.5 text-right font-mono">{r.win_rate?.toFixed(1)}%</td>
@@ -201,7 +212,7 @@ export default function Breakdowns() {
               ))}
               {!rows.length && (
                 <tr><td colSpan={9} className="px-2 py-4 text-center text-gray-500">
-                  No trades across any enabled session.
+                  No trades to bucket.
                 </td></tr>
               )}
             </tbody>
@@ -215,8 +226,9 @@ export default function Breakdowns() {
           <span className="flex items-center gap-1"><span className="w-2 h-2" style={{background: '#22c55e'}} /> 50–60%</span>
           <span className="flex items-center gap-1"><span className="w-2 h-2" style={{background: '#eab308'}} /> 40–50%</span>
           <span className="flex items-center gap-1"><span className="w-2 h-2" style={{background: '#ef4444'}} /> {'<40% WR'}</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-cyan-400" /> session start</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-purple-500" /> session end</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-cyan-400" /> DR start</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-purple-500" /> DR end</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 border border-orange-400" /> last entry</span>
         </div>
       )}
     </div>

@@ -184,6 +184,122 @@ def session_breakdown(trades: list[dict]) -> list[dict]:
     return rows
 
 
+DR_RANGE_BUCKETS = [
+    (0, 25, "15-25 pips"),
+    (25, 40, "25-40 pips"),
+    (40, 55, "40-55 pips"),
+    (55, 200, "55+ pips"),
+]
+
+
+def _bucket_row(label_key: str, label: str, sub: pd.DataFrame) -> dict:
+    """Shared row builder for DR bucket breakdowns."""
+    n = int(len(sub))
+    if n == 0:
+        return {
+            label_key: label, "trades": 0, "wins": 0, "losses": 0,
+            "win_rate": 0.0, "pnl": 0.0, "avg_pnl": 0.0,
+            "best": 0.0, "worst": 0.0, "profit_factor": 0.0,
+        }
+    wins_mask = sub["pnl"] > 0
+    losses_mask = sub["pnl"] < 0
+    gross_profit = float(sub.loc[wins_mask, "pnl"].sum())
+    gross_loss = float(-sub.loc[losses_mask, "pnl"].sum())
+    return {
+        label_key: label,
+        "trades": n,
+        "wins": int(wins_mask.sum()),
+        "losses": int(losses_mask.sum()),
+        "win_rate": float(wins_mask.sum()) / n * 100.0,
+        "pnl": float(sub["pnl"].sum()),
+        "avg_pnl": float(sub["pnl"].mean()),
+        "best": float(sub["pnl"].max()),
+        "worst": float(sub["pnl"].min()),
+        "profit_factor": _safe_div(gross_profit, gross_loss),
+    }
+
+
+def dr_range_breakdown(trades: list[dict]) -> list[dict]:
+    """Bucket trades by the DR range (in pips) that set up the trade."""
+    if not trades:
+        return []
+    df = pd.DataFrame(trades)
+    if "dr_range_pips" not in df.columns:
+        return []
+    df["pnl"] = df["pnl"].astype(float)
+    df["dr_range_pips"] = pd.to_numeric(df["dr_range_pips"], errors="coerce")
+
+    return [_bucket_row("bucket", label, df[(df["dr_range_pips"] >= lo) & (df["dr_range_pips"] < hi)])
+            for lo, hi, label in DR_RANGE_BUCKETS]
+
+
+DR_ENTRY_TIME_BUCKETS = [
+    (10.5, 11.0, "10:30-11:00"),
+    (11.0, 11.5, "11:00-11:30"),
+    (11.5, 12.0, "11:30-12:00"),
+    (12.0, 12.5, "12:00-12:30"),
+    (12.5, 13.0, "12:30-13:00"),
+    (13.0, 24.0, "13:00+"),
+]
+
+
+def dr_entry_time_breakdown(trades: list[dict], tz: str = "America/New_York") -> list[dict]:
+    """Bucket trades by entry time (local to ``tz``) into 30-min windows."""
+    if not trades:
+        return []
+    df = pd.DataFrame(trades)
+    df["entry_time"] = pd.to_datetime(df["entry_time"], utc=True)
+    try:
+        local = df["entry_time"].dt.tz_convert(tz)
+    except Exception:
+        local = df["entry_time"]
+    df["_hhmm"] = local.dt.hour + local.dt.minute / 60.0
+    df["pnl"] = df["pnl"].astype(float)
+
+    return [_bucket_row("bucket", label, df[(df["_hhmm"] >= lo) & (df["_hhmm"] < hi)])
+            for lo, hi, label in DR_ENTRY_TIME_BUCKETS]
+
+
+def dr_entry_type_breakdown(trades: list[dict]) -> list[dict]:
+    """Compare DR Retest vs Midpoint Retest entries."""
+    if not trades:
+        return []
+    df = pd.DataFrame(trades)
+    if "entry_type_used" not in df.columns:
+        return []
+    df["pnl"] = df["pnl"].astype(float)
+    return [_bucket_row("entry_type", str(name), group)
+            for name, group in df.groupby("entry_type_used")]
+
+
+def dr_directional_bias(day_states: list[dict]) -> dict:
+    """Validate the core edge: after a DR breakout, does the opposite side hold?
+
+    Returns counts and percentages for bull-break days (DR low held) and
+    bear-break days (DR high held).
+    """
+    bulls = [s for s in day_states if s.get("breakout_direction") == "bull"]
+    bears = [s for s in day_states if s.get("breakout_direction") == "bear"]
+
+    bull_held = sum(1 for s in bulls if s.get("opposite_side_held"))
+    bear_held = sum(1 for s in bears if s.get("opposite_side_held"))
+
+    return {
+        "bull_break_days": len(bulls),
+        "bull_held": bull_held,
+        "bull_held_pct": (bull_held / len(bulls) * 100.0) if bulls else 0.0,
+        "bear_break_days": len(bears),
+        "bear_held": bear_held,
+        "bear_held_pct": (bear_held / len(bears) * 100.0) if bears else 0.0,
+        "overall_days": len(bulls) + len(bears),
+        "overall_held": bull_held + bear_held,
+        "overall_held_pct": (
+            (bull_held + bear_held) / (len(bulls) + len(bears)) * 100.0
+            if (bulls or bears) else 0.0
+        ),
+    }
+
+
 def hourly_breakdown(trades: list[dict], timezone: str = "UTC") -> list[dict]:
     """Group trades by entry hour in the given timezone.
 

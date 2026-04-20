@@ -28,7 +28,7 @@ export default function App() {
       <header className="border-b border-border bg-panel/60 backdrop-blur sticky top-0 z-10">
         <div className="max-w-[1700px] mx-auto px-4 py-3 flex items-center justify-between">
           <h1 className="text-lg font-semibold tracking-tight">
-            VWAP + EMA Pullback <span className="text-accent">Backtest</span>
+            DR / IDR Breakout-Retest <span className="text-accent">Backtest</span>
           </h1>
           <div className="flex items-center gap-1">
             {VIEWS.map((v) => (

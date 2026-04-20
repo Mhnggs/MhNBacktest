@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useBacktestStore, defaultParams } from '../store/useBacktestStore'
+import { useBacktestStore } from '../store/useBacktestStore'
 import { runBacktest, getPatterns } from '../api/client'
 
 const TIMEZONES = [
@@ -9,11 +9,18 @@ const TIMEZONES = [
 ]
 
 const FALLBACK_PATTERNS = [
+  { key: 'marubozu', label: 'Marubozu' },
   { key: 'engulfing', label: 'Engulfing' },
   { key: 'hammer_star', label: 'Hammer / Shooting Star' },
+  { key: 'inside_bar', label: 'Inside Bar' },
   { key: 'piercing_cloud', label: 'Piercing Line / Dark Cloud Cover' },
-  { key: 'marubozu', label: 'Marubozu' },
   { key: 'doji', label: 'Doji' },
+]
+
+const ENTRY_TYPE_OPTIONS = [
+  { key: 'retest_only', label: 'Retest only' },
+  { key: 'midpoint_only', label: 'Midpoint retest only' },
+  { key: 'retest_then_midpoint', label: 'Retest, fallback to midpoint' },
 ]
 
 function Field({ label, children }) {
@@ -134,6 +141,27 @@ function Section({ title, children }) {
   )
 }
 
+function CustomSkipDatesInput({ value, onChange }) {
+  const [draft, setDraft] = useState((value || []).join(', '))
+  useEffect(() => { setDraft((value || []).join(', ')) }, [value])
+  return (
+    <input
+      className="input"
+      type="text"
+      placeholder="2024-03-20, 2024-05-01"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const tokens = draft
+          .split(/[,\s]+/)
+          .map((t) => t.trim())
+          .filter((t) => /^\d{4}-\d{2}-\d{2}$/.test(t))
+        onChange(tokens)
+      }}
+    />
+  )
+}
+
 export default function ParameterPanel() {
   const {
     params, setParam, sessionId, startDate, endDate, setDateRange,
@@ -159,12 +187,13 @@ export default function ParameterPanel() {
       setError('Load a dataset first (upload CSV or fetch from TwelveData)')
       return
     }
-    if (!params.allowed_patterns || params.allowed_patterns.length === 0) {
-      setError('Select at least one candlestick pattern to use as entry trigger.')
+    if (params.require_confirmation_candle &&
+        (!params.confirmation_patterns || params.confirmation_patterns.length === 0)) {
+      setError('Select at least one confirmation candle pattern, or disable the confirmation requirement.')
       return
     }
-    if (!params.use_ny && !params.use_london && !params.use_asian) {
-      setError('Enable at least one session (NY, London, or Asian).')
+    if (!params.allowed_days || params.allowed_days.length === 0) {
+      setError('Enable at least one day of the week.')
       return
     }
     setRunning(true)
@@ -187,7 +216,7 @@ export default function ParameterPanel() {
   return (
     <div className="card space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-200">Strategy Parameters</h2>
+        <h2 className="text-sm font-semibold text-gray-200">DR / IDR Strategy</h2>
         <button
           type="button"
           className="btn btn-ghost text-[11px] px-2 py-1"
@@ -198,35 +227,205 @@ export default function ParameterPanel() {
         </button>
       </div>
 
-      <Section title="EMA Crossover">
-        <Field label="EMA Fast Period">
-          <NumberInput value={params.ema_period} onChange={(v) => setParam('ema_period', v)} min={2} max={200} />
+      <Section title="Defining Range (DR)">
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="DR Start">
+            <input
+              className="input"
+              type="time"
+              value={params.dr_start_time}
+              onChange={(e) => setParam('dr_start_time', e.target.value)}
+            />
+          </Field>
+          <Field label="DR End">
+            <input
+              className="input"
+              type="time"
+              value={params.dr_end_time}
+              onChange={(e) => setParam('dr_end_time', e.target.value)}
+            />
+          </Field>
+        </div>
+        <Field label="DR Timezone">
+          <select
+            className="input"
+            value={params.dr_timezone}
+            onChange={(e) => setParam('dr_timezone', e.target.value)}
+          >
+            {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
+          </select>
         </Field>
-        <Field label="EMA Slow Period">
-          <NumberInput value={params.ema_secondary} onChange={(v) => setParam('ema_secondary', v)} min={2} max={400} />
-        </Field>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Min DR Range (pips)">
+            <NumberInput
+              value={params.min_dr_range_pips}
+              onChange={(v) => setParam('min_dr_range_pips', v)}
+              min={0} max={500} step={1}
+            />
+          </Field>
+          <Field label="Max DR Range (pips)">
+            <NumberInput
+              value={params.max_dr_range_pips}
+              onChange={(v) => setParam('max_dr_range_pips', v)}
+              min={1} max={1000} step={1}
+            />
+          </Field>
+        </div>
         <div className="text-[11px] text-gray-500 leading-relaxed">
-          Bullish cross (fast crosses above slow) → look for a long setup. Bearish cross → short setup.
+          Days whose DR range falls outside the min/max band are skipped as
+          either too flat or too volatile.
         </div>
       </Section>
 
-      <Section title="Entry Patterns">
-        <PatternToggles
-          options={patternOptions}
-          value={params.allowed_patterns}
-          onChange={(v) => setParam('allowed_patterns', v)}
+      <Section title="Entry">
+        <Field label="Entry Mode">
+          <select
+            className="input"
+            value={params.entry_type}
+            onChange={(e) => setParam('entry_type', e.target.value)}
+          >
+            {ENTRY_TYPE_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>{o.label}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Retest Tolerance (pips)">
+          <NumberInput
+            value={params.retest_tolerance_pips}
+            onChange={(v) => setParam('retest_tolerance_pips', v)}
+            min={0} max={100} step={0.5}
+          />
+        </Field>
+        <Toggle
+          label="Require confirmation candle"
+          value={params.require_confirmation_candle}
+          onChange={(v) => setParam('require_confirmation_candle', v)}
         />
+        {params.require_confirmation_candle && (
+          <>
+            <div className="label">Confirmation Patterns</div>
+            <PatternToggles
+              options={patternOptions}
+              value={params.confirmation_patterns}
+              onChange={(v) => setParam('confirmation_patterns', v)}
+            />
+          </>
+        )}
         <div className="text-[11px] text-gray-500 leading-relaxed">
-          A trade only fires when one of the selected patterns prints on the crossover bar.
+          After the first clean break of the DR, the strategy waits for price
+          to return within tolerance of the broken level (or the DR midpoint).
         </div>
       </Section>
 
-      <Section title="Risk">
-        <Field label="Stop Loss (pips)">
-          <NumberInput value={params.stop_loss_pips} onChange={(v) => setParam('stop_loss_pips', v)} step={1} min={1} max={1000} />
+      <Section title="Time Limits">
+        <Field label={`Retest Window (min) — ${params.retest_window_minutes}`}>
+          <Slider
+            value={params.retest_window_minutes}
+            onChange={(v) => setParam('retest_window_minutes', v)}
+            min={15} max={300} step={5}
+          />
         </Field>
-        <Field label={`Risk / Reward (${params.risk_reward})`}>
-          <Slider value={params.risk_reward} onChange={(v) => setParam('risk_reward', v)} min={0.5} max={5.0} step={0.25} />
+        <Field label="Last Entry Time">
+          <input
+            className="input"
+            type="time"
+            value={params.last_entry_time}
+            onChange={(e) => setParam('last_entry_time', e.target.value)}
+          />
+        </Field>
+        <div className="text-[11px] text-gray-500 leading-relaxed">
+          Entries blocked after the last entry time. Open trades are force-closed
+          on the bar closing at or past this time.
+        </div>
+      </Section>
+
+      <Section title="Stops & Targets">
+        <Field label="Stop Buffer (pips beyond DR level)">
+          <NumberInput
+            value={params.stop_buffer_pips}
+            onChange={(v) => setParam('stop_buffer_pips', v)}
+            min={0} max={100} step={0.5}
+          />
+        </Field>
+        <Toggle
+          label="Use Partial TP"
+          value={params.use_partial_tp}
+          onChange={(v) => setParam('use_partial_tp', v)}
+        />
+        <Field label={`T1 × DR Range (${params.partial_tp_1_mult})`}>
+          <Slider
+            value={params.partial_tp_1_mult}
+            onChange={(v) => setParam('partial_tp_1_mult', v)}
+            min={0.1} max={3.0} step={0.05}
+          />
+        </Field>
+        <Field label={`T2 × DR Range (${params.partial_tp_2_mult})`}>
+          <Slider
+            value={params.partial_tp_2_mult}
+            onChange={(v) => setParam('partial_tp_2_mult', v)}
+            min={0.25} max={5.0} step={0.05}
+          />
+        </Field>
+        {params.use_partial_tp && (
+          <Field label={`% closed at T1 (${params.partial_tp_pct}%)`}>
+            <Slider
+              value={params.partial_tp_pct}
+              onChange={(v) => setParam('partial_tp_pct', v)}
+              min={10} max={90} step={5}
+            />
+          </Field>
+        )}
+        <Toggle
+          label="Move stop to BE after T1"
+          value={params.move_be_after_t1}
+          onChange={(v) => setParam('move_be_after_t1', v)}
+        />
+        <Field label="Max Trades / Day">
+          <NumberInput
+            value={params.max_trades_per_day}
+            onChange={(v) => setParam('max_trades_per_day', v)}
+            min={1} max={10}
+          />
+        </Field>
+      </Section>
+
+      <Section title="News Filter">
+        <Toggle
+          label="Skip NFP / FOMC / CPI days"
+          value={params.enable_news_filter}
+          onChange={(v) => setParam('enable_news_filter', v)}
+        />
+        <Field label="Custom Skip Dates (YYYY-MM-DD, comma-separated)">
+          <CustomSkipDatesInput
+            value={params.custom_skip_dates}
+            onChange={(v) => setParam('custom_skip_dates', v)}
+          />
+        </Field>
+        <div className="text-[11px] text-gray-500 leading-relaxed">
+          Built-in calendar covers first-Friday NFP, FOMC meeting dates and
+          approximate CPI days (2016-2026).
+        </div>
+      </Section>
+
+      <Section title="Day Filter">
+        <DayToggles value={params.allowed_days} onChange={(v) => setParam('allowed_days', v)} />
+        <div className="text-[11px] text-gray-500">Based on DR timezone.</div>
+      </Section>
+
+      <Section title="Account">
+        <Field label="Starting Capital ($)">
+          <NumberInput
+            value={params.starting_capital}
+            onChange={(v) => setParam('starting_capital', v)}
+            min={100} step={100}
+          />
+        </Field>
+        <Field label={`Risk / Trade % (${params.risk_per_trade_pct})`}>
+          <Slider
+            value={params.risk_per_trade_pct}
+            onChange={(v) => setParam('risk_per_trade_pct', v)}
+            min={0.1} max={5} step={0.1}
+          />
         </Field>
         <Field label="Pip Size">
           <select
@@ -239,130 +438,6 @@ export default function ParameterPanel() {
             <option value={0.1}>0.1 (XAUUSD / Gold)</option>
             <option value={1}>1 (indices, BTC)</option>
           </select>
-        </Field>
-        <Field label="Max Trades / Day">
-          <NumberInput value={params.max_trades_per_day} onChange={(v) => setParam('max_trades_per_day', v)} min={1} max={50} />
-        </Field>
-      </Section>
-
-      <Section title="Partial Take-Profit">
-        <Toggle label="Enable Partial TP" value={params.use_partial_tp} onChange={(v) => setParam('use_partial_tp', v)} />
-        {params.use_partial_tp && (
-          <>
-            <Field label={`Take partial at (${params.partial_tp_r}R)`}>
-              <Slider value={params.partial_tp_r} onChange={(v) => setParam('partial_tp_r', v)} min={0.5} max={3.0} step={0.1} />
-            </Field>
-            <Field label={`% of position closed (${params.partial_tp_pct}%)`}>
-              <Slider value={params.partial_tp_pct} onChange={(v) => setParam('partial_tp_pct', v)} min={10} max={90} step={5} />
-            </Field>
-            <div className="text-[11px] text-gray-500 leading-relaxed">
-              Closes that % of the position once price reaches the R-multiple,
-              then moves stop to break-even for the runner.
-            </div>
-          </>
-        )}
-      </Section>
-
-      <Section title="Break-Even Stop">
-        <Toggle label="Enable Breakeven" value={params.use_breakeven} onChange={(v) => setParam('use_breakeven', v)} />
-        {params.use_breakeven && (
-          <>
-            <Field label={`Move SL to BE at (${params.breakeven_r}R)`}>
-              <Slider value={params.breakeven_r} onChange={(v) => setParam('breakeven_r', v)} min={0.5} max={3.0} step={0.1} />
-            </Field>
-            <div className="text-[11px] text-gray-500 leading-relaxed">
-              When price runs in your favour by this R-multiple, the stop
-              jumps to your entry price. Nothing is closed.
-            </div>
-          </>
-        )}
-      </Section>
-
-      <Section title="NY Session">
-        <Toggle label="Enable NY" value={params.use_ny} onChange={(v) => setParam('use_ny', v)} />
-        {params.use_ny && (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Morning Start">
-                <input className="input" type="time" value={params.session_start} onChange={(e) => setParam('session_start', e.target.value)} />
-              </Field>
-              <Field label="Morning End">
-                <input className="input" type="time" value={params.session_end} onChange={(e) => setParam('session_end', e.target.value)} />
-              </Field>
-            </div>
-            <Toggle label="Use Afternoon Window" value={params.use_session_2} onChange={(v) => setParam('use_session_2', v)} />
-            {params.use_session_2 && (
-              <div className="grid grid-cols-2 gap-2">
-                <Field label="Afternoon Start">
-                  <input className="input" type="time" value={params.session_2_start} onChange={(e) => setParam('session_2_start', e.target.value)} />
-                </Field>
-                <Field label="Afternoon End">
-                  <input className="input" type="time" value={params.session_2_end} onChange={(e) => setParam('session_2_end', e.target.value)} />
-                </Field>
-              </div>
-            )}
-            <Field label="NY Timezone">
-              <select className="input" value={params.timezone} onChange={(e) => setParam('timezone', e.target.value)}>
-                {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
-              </select>
-            </Field>
-          </>
-        )}
-      </Section>
-
-      <Section title="London Session">
-        <Toggle label="Enable London" value={params.use_london} onChange={(v) => setParam('use_london', v)} />
-        {params.use_london && (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Start">
-                <input className="input" type="time" value={params.london_start} onChange={(e) => setParam('london_start', e.target.value)} />
-              </Field>
-              <Field label="End">
-                <input className="input" type="time" value={params.london_end} onChange={(e) => setParam('london_end', e.target.value)} />
-              </Field>
-            </div>
-            <Field label="London Timezone">
-              <select className="input" value={params.london_tz} onChange={(e) => setParam('london_tz', e.target.value)}>
-                {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
-              </select>
-            </Field>
-          </>
-        )}
-      </Section>
-
-      <Section title="Asian Session">
-        <Toggle label="Enable Asian" value={params.use_asian} onChange={(v) => setParam('use_asian', v)} />
-        {params.use_asian && (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Start">
-                <input className="input" type="time" value={params.asian_start} onChange={(e) => setParam('asian_start', e.target.value)} />
-              </Field>
-              <Field label="End">
-                <input className="input" type="time" value={params.asian_end} onChange={(e) => setParam('asian_end', e.target.value)} />
-              </Field>
-            </div>
-            <Field label="Asian Timezone">
-              <select className="input" value={params.asian_tz} onChange={(e) => setParam('asian_tz', e.target.value)}>
-                {TIMEZONES.map((tz) => (<option key={tz} value={tz}>{tz}</option>))}
-              </select>
-            </Field>
-          </>
-        )}
-      </Section>
-
-      <Section title="Day Filter">
-        <DayToggles value={params.allowed_days} onChange={(v) => setParam('allowed_days', v)} />
-        <div className="text-[11px] text-gray-500">Based on backtest timezone.</div>
-      </Section>
-
-      <Section title="Account">
-        <Field label="Starting Capital ($)">
-          <NumberInput value={params.starting_capital} onChange={(v) => setParam('starting_capital', v)} min={100} step={100} />
-        </Field>
-        <Field label={`Risk / Trade % (${params.risk_per_trade_pct})`}>
-          <Slider value={params.risk_per_trade_pct} onChange={(v) => setParam('risk_per_trade_pct', v)} min={0.1} max={5} step={0.1} />
         </Field>
         <div className="grid grid-cols-2 gap-2">
           <Field label="From">

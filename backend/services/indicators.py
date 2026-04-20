@@ -1,27 +1,69 @@
-"""Indicator calculations: EMAs and candlestick patterns."""
+"""Indicator calculations: DR range levels + candlestick patterns."""
 
 from __future__ import annotations
 
+from datetime import time as dtime
+
 import numpy as np
 import pandas as pd
+import pytz
 
 
-def add_ema(df: pd.DataFrame, period: int, column: str = "close",
-            out_col: str | None = None) -> pd.DataFrame:
+def _parse_time(s: str) -> dtime:
+    h, m = s.split(":")
+    return dtime(int(h), int(m))
+
+
+def add_dr_levels(
+    df: pd.DataFrame,
+    dr_start: str = "09:30",
+    dr_end: str = "10:30",
+    dr_tz: str = "America/New_York",
+) -> pd.DataFrame:
+    """Attach per-day DR high/low/range/midpoint plus dr_period / post_dr flags.
+
+    The DR (Defining Range) is the high/low between ``dr_start`` and
+    ``dr_end`` in ``dr_tz`` each day. Every bar of the day receives that
+    day's DR levels as columns so downstream code can read them without
+    re-computing. Bars before 09:30 NY get NaN DR levels.
+    """
     out = df.copy()
-    name = out_col or f"ema_{period}"
-    out[name] = out[column].ewm(span=period, adjust=False).mean()
+    if not isinstance(out["datetime"].dtype, pd.DatetimeTZDtype):
+        raise ValueError("add_dr_levels requires timezone-aware datetimes (UTC expected)")
+
+    tz = pytz.timezone(dr_tz)
+    local = out["datetime"].dt.tz_convert(tz)
+    out["_dr_date"] = local.dt.date
+    out["_dr_hhmm"] = local.dt.hour + local.dt.minute / 60.0
+
+    start_t = _parse_time(dr_start)
+    end_t = _parse_time(dr_end)
+    start_hhmm = start_t.hour + start_t.minute / 60.0
+    end_hhmm = end_t.hour + end_t.minute / 60.0
+
+    out["dr_period"] = (out["_dr_hhmm"] >= start_hhmm) & (out["_dr_hhmm"] < end_hhmm)
+    out["post_dr"] = out["_dr_hhmm"] >= end_hhmm
+
+    # Compute per-day DR high/low over the DR window.
+    dr_window = out[out["dr_period"]]
+    daily = dr_window.groupby("_dr_date").agg(
+        dr_high=("high", "max"),
+        dr_low=("low", "min"),
+    )
+    daily["dr_range"] = daily["dr_high"] - daily["dr_low"]
+    daily["dr_midpoint"] = (daily["dr_high"] + daily["dr_low"]) / 2.0
+    daily["dr_upper_quarter"] = daily["dr_low"] + daily["dr_range"] * 0.75
+    daily["dr_lower_quarter"] = daily["dr_low"] + daily["dr_range"] * 0.25
+
+    out = out.merge(daily, how="left", left_on="_dr_date", right_index=True)
+
+    # Housekeep helper columns — keep _dr_date because strategy groups by it.
+    out = out.drop(columns=["_dr_hhmm"])
     return out
 
 
 def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    """Detect candlestick patterns usable as entry triggers.
-
-    Each pattern is emitted as its own boolean column plus aggregate
-    ``bullish_patterns`` / ``bearish_patterns`` columns that join the name
-    of every pattern that printed on the bar (comma-separated) — the trade
-    log uses these to record which pattern fired.
-    """
+    """Detect candlestick patterns usable as entry confirmation triggers."""
     out = df.copy()
     body = (out["close"] - out["open"]).abs()
     candle_range = (out["high"] - out["low"]).replace(0, np.nan)
@@ -33,6 +75,8 @@ def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
 
     prev_open = out["open"].shift(1)
     prev_close = out["close"].shift(1)
+    prev_high = out["high"].shift(1)
+    prev_low = out["low"].shift(1)
     prev_body = (prev_close - prev_open).abs()
     prev_mid = (prev_open + prev_close) / 2.0
 
@@ -66,11 +110,8 @@ def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
         & (body > 0)
     ).fillna(False)
 
-    # A doji has a very small body relative to the overall range.
     out["doji"] = ((body / candle_range) < 0.1).fillna(False)
 
-    # Piercing line: after a bearish bar, a bullish bar that opens below
-    # the prior low and closes above the midpoint of the prior body.
     out["piercing_line"] = (
         bullish
         & (prev_close < prev_open)
@@ -79,8 +120,6 @@ def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
         & (out["close"] < prev_open)
     ).fillna(False)
 
-    # Dark cloud cover: after a bullish bar, a bearish bar that opens
-    # above the prior high and closes below the midpoint of the prior body.
     out["dark_cloud_cover"] = (
         bearish
         & (prev_close > prev_open)
@@ -89,7 +128,6 @@ def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
         & (out["close"] > prev_open)
     ).fillna(False)
 
-    # Marubozu: large solid body with almost no wicks in the trade direction.
     body_ratio = (body / candle_range).fillna(0.0)
     out["bullish_marubozu"] = (
         bullish
@@ -102,16 +140,22 @@ def add_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
         & ((lower_wick / candle_range).fillna(0.0) <= 0.1)
     ).fillna(False)
 
+    # Inside bar: current bar entirely within previous bar's range.
+    # Direction-agnostic — usable both ways.
+    inside = (out["high"] < prev_high) & (out["low"] > prev_low)
+    out["inside_bar_bull"] = inside.fillna(False)
+    out["inside_bar_bear"] = inside.fillna(False)
+
     return out
 
 
 def build_indicator_frame(
     df: pd.DataFrame,
-    ema_period: int = 9,
-    ema_secondary: int = 20,
+    dr_start: str = "09:30",
+    dr_end: str = "10:30",
+    dr_tz: str = "America/New_York",
 ) -> pd.DataFrame:
-    """Attach EMAs and candle pattern columns."""
-    out = add_ema(df, ema_period, out_col="ema_fast")
-    out = add_ema(out, ema_secondary, out_col="ema_slow")
+    """Attach DR levels + candlestick pattern columns."""
+    out = add_dr_levels(df, dr_start=dr_start, dr_end=dr_end, dr_tz=dr_tz)
     out = add_candle_patterns(out)
     return out

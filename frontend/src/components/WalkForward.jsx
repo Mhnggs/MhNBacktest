@@ -1,11 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid,
   ResponsiveContainer, ReferenceLine, Legend,
 } from 'recharts'
 import { useBacktestStore } from '../store/useBacktestStore'
 import { runWalkForward } from '../api/client'
-import { SESSION_SCOPES, applySessionScope } from '../util/sessionScope'
 
 function fmtMoney(v) {
   if (v == null || isNaN(v)) return '—'
@@ -69,7 +68,6 @@ export default function WalkForward() {
     walkForwardResults, setWalkForwardResults,
     walkForwardTrainPct, setWalkForwardTrainPct,
   } = useBacktestStore()
-  const [sessionScope, setSessionScope] = useState('all')
 
   async function handleRun() {
     if (!sessionId) {
@@ -81,7 +79,7 @@ export default function WalkForward() {
     try {
       const data = await runWalkForward({
         session_id: sessionId,
-        params: applySessionScope(params, sessionScope),
+        params,
         start_date: startDate || null,
         end_date: endDate || null,
         train_pct: walkForwardTrainPct,
@@ -124,18 +122,6 @@ export default function WalkForward() {
           </p>
         </div>
         <div className="flex items-end gap-3">
-          <div>
-            <div className="label">Session</div>
-            <select
-              className="input w-auto text-xs py-1"
-              value={sessionScope}
-              onChange={(e) => setSessionScope(e.target.value)}
-            >
-              {SESSION_SCOPES.map((s) => (
-                <option key={s.key} value={s.key}>{s.label}</option>
-              ))}
-            </select>
-          </div>
           <div>
             <div className="label">Train split</div>
             <div className="flex items-center gap-2">

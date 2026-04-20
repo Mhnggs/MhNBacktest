@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useBacktestStore } from '../store/useBacktestStore'
 import { getOptimizeOptions, runAutoRobust } from '../api/client'
-import { SESSION_SCOPES, applySessionScope } from '../util/sessionScope'
 
 const METRIC_LABELS = {
   sharpe_ratio: 'Sharpe Ratio',
@@ -126,15 +125,14 @@ export default function FindRobust() {
 
   const [options, setOptions] = useState([])
   const [axes, setAxes] = useState([
-    { key: 'stop_loss_pips', start: 10, end: 40, step: 5 },
-    { key: 'risk_reward', start: 1.0, end: 3.0, step: 0.5 },
+    { key: 'min_dr_range_pips', start: 10, end: 25, step: 5 },
+    { key: 'retest_tolerance_pips', start: 2, end: 8, step: 2 },
   ])
   const [metric, setMetric] = useState('sharpe_ratio')
   const [trainPct, setTrainPct] = useState(0.7)
   const [topK, setTopK] = useState(10)
   const [minTestTrades, setMinTestTrades] = useState(5)
   const [onlyPassing, setOnlyPassing] = useState(true)
-  const [sessionScope, setSessionScope] = useState('all')
 
   useEffect(() => {
     getOptimizeOptions().then((d) => setOptions(d.params || [])).catch(() => {})
@@ -176,7 +174,7 @@ export default function FindRobust() {
     try {
       const data = await runAutoRobust({
         session_id: sessionId,
-        params: applySessionScope(params, sessionScope),
+        params,
         start_date: startDate || null,
         end_date: endDate || null,
         sweeps: axes.map((a) => ({ key: a.key, values: range(a.start, a.end, a.step) })),
@@ -238,18 +236,11 @@ export default function FindRobust() {
           )}
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
           <div>
             <div className="label">Rank by</div>
             <select className="input text-xs py-1" value={metric} onChange={(e) => setMetric(e.target.value)}>
               {Object.entries(METRIC_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
-            </select>
-          </div>
-          <div>
-            <div className="label">Session</div>
-            <select className="input text-xs py-1" value={sessionScope}
-              onChange={(e) => setSessionScope(e.target.value)}>
-              {SESSION_SCOPES.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
             </select>
           </div>
           <div>

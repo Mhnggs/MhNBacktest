@@ -17,9 +17,12 @@ from ..models.schemas import (
 from ..services.performance import (
     compute_stats,
     dow_breakdown,
+    dr_directional_bias,
+    dr_entry_time_breakdown,
+    dr_entry_type_breakdown,
+    dr_range_breakdown,
     hourly_breakdown,
     monthly_breakdown,
-    session_breakdown,
 )
 from ..services.store import get_dataset
 from ..services.strategy import StrategyParams, run_backtest
@@ -27,17 +30,27 @@ from ..services.strategy import StrategyParams, run_backtest
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 
-def _candles_with_indicators(df: pd.DataFrame, ema_period: int,
-                             ema_secondary: int) -> list[dict]:
-    """Attach EMAs + candle patterns and serialize rows for the chart."""
+def _candles_with_indicators(df: pd.DataFrame, params: "StrategyParams") -> list[dict]:
+    """Attach DR levels + candle patterns and serialize rows for the chart."""
     from ..services.indicators import build_indicator_frame
 
+    work = df.copy()
+    if not isinstance(work["datetime"].dtype, pd.DatetimeTZDtype):
+        source_tz = df.attrs.get("source_tz", "UTC")
+        work["datetime"] = pd.to_datetime(work["datetime"]).dt.tz_localize(
+            source_tz, nonexistent="shift_forward", ambiguous="NaT",
+        ).dt.tz_convert("UTC")
+        work = work.dropna(subset=["datetime"]).reset_index(drop=True)
     with_ind = build_indicator_frame(
-        df,
-        ema_period=ema_period,
-        ema_secondary=ema_secondary,
+        work,
+        dr_start=params.dr_start_time,
+        dr_end=params.dr_end_time,
+        dr_tz=params.dr_timezone,
     )
     with_ind = with_ind.replace([np.inf, -np.inf], np.nan)
+    # Drop helper column that's not JSON-serializable.
+    if "_dr_date" in with_ind.columns:
+        with_ind = with_ind.drop(columns=["_dr_date"])
     serialized = (
         with_ind.assign(datetime=lambda d: d["datetime"].astype(str))
         .to_json(orient="records", date_format="iso")
@@ -64,20 +77,16 @@ def _load_filtered_df(req: BacktestRequest) -> pd.DataFrame:
 
 
 def _session_markers(params: StrategyParams) -> list[dict]:
+    """DR window markers on the hourly breakdown chart."""
     def _to_hour(s: str) -> float:
         h, m = s.split(":")
         return int(h) + int(m) / 60.0
 
-    markers = [
-        {"label": "S1 start", "hour": _to_hour(params.session_start)},
-        {"label": "S1 end", "hour": _to_hour(params.session_end)},
+    return [
+        {"label": "DR start", "hour": _to_hour(params.dr_start_time)},
+        {"label": "DR end", "hour": _to_hour(params.dr_end_time)},
+        {"label": "Last entry", "hour": _to_hour(params.last_entry_time)},
     ]
-    if params.use_session_2:
-        markers += [
-            {"label": "S2 start", "hour": _to_hour(params.session_2_start)},
-            {"label": "S2 end", "hour": _to_hour(params.session_2_end)},
-        ]
-    return markers
 
 
 def _run_segment(df: pd.DataFrame, params: StrategyParams) -> dict:
@@ -86,14 +95,19 @@ def _run_segment(df: pd.DataFrame, params: StrategyParams) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"Backtest failed: {exc}") from exc
     stats = compute_stats(result["trades"], result["equity_curve"], params.starting_capital)
+    day_states = result.get("day_states", [])
     return {
         "trades": result["trades"],
         "equity_curve": result["equity_curve"],
         "stats": stats,
         "monthly_breakdown": monthly_breakdown(result["trades"]),
         "dow_breakdown": dow_breakdown(result["trades"]),
-        "hourly_breakdown": hourly_breakdown(result["trades"], params.timezone),
-        "session_breakdown": session_breakdown(result["trades"]),
+        "hourly_breakdown": hourly_breakdown(result["trades"], params.dr_timezone),
+        "dr_range_breakdown": dr_range_breakdown(result["trades"]),
+        "dr_entry_time_breakdown": dr_entry_time_breakdown(result["trades"], params.dr_timezone),
+        "dr_entry_type_breakdown": dr_entry_type_breakdown(result["trades"]),
+        "dr_directional_bias": dr_directional_bias(day_states),
+        "day_states": day_states,
         "diagnostics": result.get("diagnostics", {}),
     }
 
@@ -104,10 +118,7 @@ def run(req: BacktestRequest):
     params = StrategyParams(**req.params.model_dump())
 
     segment = _run_segment(df, params)
-
-    candles = _candles_with_indicators(
-        df, params.ema_period, params.ema_secondary,
-    )
+    candles = _candles_with_indicators(df, params)
 
     return {
         **segment,
@@ -118,17 +129,11 @@ def run(req: BacktestRequest):
 
 @router.post("/candles")
 def candles(req: BacktestRequest):
-    """Return candles with indicator overlays for the chart, without running the strategy.
-
-    Useful when a backtest produces zero trades and you still want to inspect
-    VWAP / EMA / price action for the filtered range.
-    """
+    """Return candles with DR-level overlays for the chart, without running the strategy."""
     df = _load_filtered_df(req)
     params = StrategyParams(**req.params.model_dump())
     return {
-        "candles": _candles_with_indicators(
-            df, params.ema_period, params.ema_secondary,
-        ),
+        "candles": _candles_with_indicators(df, params),
         "session_markers": _session_markers(params),
     }
 
@@ -177,11 +182,13 @@ def _consistency_score(train_stats: dict, test_stats: dict) -> dict:
 
 
 OPTIMIZE_ALLOWED_PARAMS = {
-    "ema_period": {"type": int, "label": "EMA Fast", "min": 3, "max": 100},
-    "ema_secondary": {"type": int, "label": "EMA Slow", "min": 3, "max": 200},
-    "stop_loss_pips": {"type": float, "label": "Stop Loss (pips)", "min": 1.0, "max": 500.0},
-    "risk_reward": {"type": float, "label": "Risk/Reward", "min": 0.5, "max": 8.0},
-    "max_trades_per_day": {"type": int, "label": "Max Trades/Day", "min": 1, "max": 50},
+    "min_dr_range_pips": {"type": float, "label": "Min DR Range (pips)", "min": 5.0, "max": 100.0},
+    "max_dr_range_pips": {"type": float, "label": "Max DR Range (pips)", "min": 20.0, "max": 200.0},
+    "retest_tolerance_pips": {"type": float, "label": "Retest Tolerance (pips)", "min": 0.0, "max": 30.0},
+    "stop_buffer_pips": {"type": float, "label": "Stop Buffer (pips)", "min": 0.0, "max": 30.0},
+    "retest_window_minutes": {"type": int, "label": "Retest Window (min)", "min": 15, "max": 300},
+    "partial_tp_1_mult": {"type": float, "label": "T1 × DR Range", "min": 0.25, "max": 2.0},
+    "partial_tp_2_mult": {"type": float, "label": "T2 × DR Range", "min": 0.5, "max": 3.0},
     "risk_per_trade_pct": {"type": float, "label": "Risk/Trade %", "min": 0.1, "max": 10.0},
 }
 
@@ -201,10 +208,11 @@ def _coerce(name: str, value: float):
 
 
 PATTERN_OPTIONS = [
+    {"key": "marubozu", "label": "Marubozu"},
     {"key": "engulfing", "label": "Engulfing"},
     {"key": "hammer_star", "label": "Hammer / Shooting Star"},
+    {"key": "inside_bar", "label": "Inside Bar"},
     {"key": "piercing_cloud", "label": "Piercing Line / Dark Cloud Cover"},
-    {"key": "marubozu", "label": "Marubozu"},
     {"key": "doji", "label": "Doji"},
 ]
 

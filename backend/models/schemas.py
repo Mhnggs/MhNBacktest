@@ -7,60 +7,56 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-ALLOWED_PATTERN_KEYS = {
-    "engulfing", "hammer_star", "piercing_cloud", "marubozu", "doji",
+ENTRY_TYPES = {"retest_only", "midpoint_only", "retest_then_midpoint"}
+
+ALLOWED_CONFIRMATION_PATTERNS = {
+    "engulfing", "marubozu", "hammer_star", "inside_bar", "piercing_cloud", "doji",
 }
 
 
 class StrategyParamsSchema(BaseModel):
-    # Core strategy
-    ema_period: int = Field(9, ge=2, le=200)
-    ema_secondary: int = Field(20, ge=2, le=400)
-    allowed_patterns: list[str] = Field(
-        default_factory=lambda: ["engulfing", "hammer_star", "marubozu"],
-    )
-    stop_loss_pips: float = Field(20.0, gt=0.0, le=1000.0)
-    risk_reward: float = Field(2.0, ge=0.5, le=10.0)
+    """DR / IDR breakout-retest strategy parameters."""
+
+    # Instrument
     pip_size: float = Field(0.0001, gt=0.0)
 
     # Sizing / risk
     starting_capital: float = Field(10_000.0, gt=0.0)
     risk_per_trade_pct: float = Field(1.0, gt=0.0, le=100.0)
-    max_trades_per_day: int = Field(3, ge=1, le=50)
 
-    # Partial take-profit: close `partial_tp_pct`% of the position at
-    # `partial_tp_r` × risk and move stop to breakeven for the runner.
-    use_partial_tp: bool = False
-    partial_tp_r: float = Field(1.5, gt=0.0, le=10.0)
+    # DR window
+    dr_start_time: str = "09:30"
+    dr_end_time: str = "10:30"
+    dr_timezone: str = "America/New_York"
+    min_dr_range_pips: float = Field(15.0, ge=0.0, le=500.0)
+    max_dr_range_pips: float = Field(70.0, gt=0.0, le=1000.0)
+
+    # Entry
+    entry_type: str = Field("retest_then_midpoint")
+    retest_tolerance_pips: float = Field(5.0, ge=0.0, le=100.0)
+    require_confirmation_candle: bool = True
+    confirmation_patterns: list[str] = Field(
+        default_factory=lambda: ["marubozu", "engulfing"],
+    )
+
+    # Time limits
+    retest_window_minutes: int = Field(90, ge=1, le=600)
+    last_entry_time: str = "13:00"
+
+    # Risk / exits
+    stop_buffer_pips: float = Field(3.0, ge=0.0, le=100.0)
+    use_partial_tp: bool = True
+    partial_tp_1_mult: float = Field(0.5, gt=0.0, le=5.0)
+    partial_tp_2_mult: float = Field(1.0, gt=0.0, le=5.0)
     partial_tp_pct: float = Field(50.0, gt=0.0, lt=100.0)
+    move_be_after_t1: bool = True
+    max_trades_per_day: int = Field(1, ge=1, le=10)
 
-    # Standalone breakeven: move stop to entry price once price reaches
-    # `breakeven_r` × risk in favour, without closing anything.
-    use_breakeven: bool = False
-    breakeven_r: float = Field(1.5, gt=0.0, le=10.0)
+    # News filter
+    enable_news_filter: bool = True
+    custom_skip_dates: list[str] = Field(default_factory=list)
 
-    # Session (NY — supports a morning + afternoon window)
-    use_ny: bool = True
-    session_start: str = "09:45"
-    session_end: str = "11:30"
-    session_2_start: str = "13:30"
-    session_2_end: str = "15:00"
-    use_session_2: bool = True
-    timezone: str = "America/New_York"
-
-    # London session
-    use_london: bool = False
-    london_start: str = "08:00"
-    london_end: str = "11:00"
-    london_tz: str = "Europe/London"
-
-    # Asian session (Tokyo by default)
-    use_asian: bool = False
-    asian_start: str = "09:00"
-    asian_end: str = "12:00"
-    asian_tz: str = "Asia/Tokyo"
-
-    # Day filter
+    # Day filter (0 = Mon … 4 = Fri)
     allowed_days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
 
 
@@ -86,8 +82,8 @@ class WalkForwardRequest(BacktestRequest):
 
 class OptimizeRequest(BacktestRequest):
     x_param: str
-    x_values: list[float]
     y_param: str
+    x_values: list[float]
     y_values: list[float]
     metric: str = Field(
         "sharpe_ratio",

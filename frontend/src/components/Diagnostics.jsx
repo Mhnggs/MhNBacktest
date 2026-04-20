@@ -1,79 +1,131 @@
 import { useBacktestStore } from '../store/useBacktestStore'
 
-const FILTER_LABELS = {
-  rejected_day_of_week: 'Day of week not allowed',
-  rejected_max_per_day: 'Daily trade cap',
-  rejected_open_trade: 'Already in trade',
-  rejected_no_pattern: 'No pattern on crossover bar',
+function Stat({ label, value, tone }) {
+  const toneClass = tone === 'good'
+    ? 'text-good'
+    : tone === 'bad'
+    ? 'text-bad'
+    : tone === 'warn'
+    ? 'text-warn'
+    : 'text-gray-300'
+  return (
+    <>
+      <div className="text-gray-400">{label}</div>
+      <div className={`text-right font-mono ${toneClass}`}>{value}</div>
+    </>
+  )
+}
+
+function pct(num, denom) {
+  if (!denom) return '—'
+  return `${((num / denom) * 100).toFixed(1)}%`
 }
 
 export default function Diagnostics() {
   const results = useBacktestStore((s) => s.results)
   if (!results) return null
   const d = results.diagnostics || {}
-  const totalTrades = results.trades?.length || 0
-  const patternCounts = d.pattern_counts || {}
-  const patternEntries = Object.entries(patternCounts).sort((a, b) => b[1] - a[1])
+  const bias = results.dr_directional_bias || {}
+  const entries = d.entries_via_retest || 0
+  const midEntries = d.entries_via_midpoint || 0
+  const breakouts = d.days_with_breakout || 0
+  const validDays = d.valid_dr_days || 0
+  const totalDays = d.total_days_seen || 0
+  const newsByType = d.news_skips_by_type || {}
 
-  if (totalTrades > 0) {
-    return (
-      <div className="card text-xs">
-        <h2 className="text-sm font-semibold text-gray-200 mb-2">Diagnostics</h2>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-gray-300">
-          <div>Bars processed</div><div className="text-right font-mono">{d.total_bars || 0}</div>
-          <div>In session</div><div className="text-right font-mono">{d.in_session_bars || 0}</div>
-          <div>Bullish crosses</div><div className="text-right font-mono text-good">{d.bullish_crosses || 0}</div>
-          <div>Bearish crosses</div><div className="text-right font-mono text-bad">{d.bearish_crosses || 0}</div>
-          <div>Long signals</div><div className="text-right font-mono text-good">{d.long_signals || 0}</div>
-          <div>Short signals</div><div className="text-right font-mono text-bad">{d.short_signals || 0}</div>
-          <div>Rejected (no pattern)</div><div className="text-right font-mono">{d.rejected_no_pattern || 0}</div>
-          <div>Rejected (day filter)</div><div className="text-right font-mono">{d.rejected_day_of_week || 0}</div>
-          <div>Rejected (daily cap)</div><div className="text-right font-mono">{d.rejected_max_per_day || 0}</div>
-          <div>Rejected (in trade)</div><div className="text-right font-mono">{d.rejected_open_trade || 0}</div>
-        </div>
-        {patternEntries.length > 0 && (
-          <div className="mt-3 border-t border-border pt-2">
-            <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
-              Patterns that fired
-            </div>
-            <div className="space-y-1">
-              {patternEntries.map(([name, count]) => (
-                <div key={name} className="flex justify-between text-xs">
-                  <span className="text-gray-300">{name}</span>
-                  <span className="font-mono text-gray-400">{count}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    )
-  }
-
-  // Zero trades — show why
-  const rejections = Object.entries(FILTER_LABELS)
-    .map(([k, label]) => [label, d[k] || 0])
-    .sort((a, b) => b[1] - a[1])
+  // Backend returns *_held_pct already as 0-100.
+  const biasOverall = bias.overall_held_pct
+  const biasTone = biasOverall == null
+    ? 'muted'
+    : biasOverall >= 70
+    ? 'good'
+    : biasOverall >= 55
+    ? 'warn'
+    : 'bad'
 
   return (
-    <div className="card">
-      <h2 className="text-sm font-semibold text-warn mb-2">Zero trades — why?</h2>
-      <div className="text-xs text-gray-400 mb-3 space-y-0.5">
-        <div>{d.total_bars || 0} bars processed · {d.in_session_bars || 0} in session</div>
-        <div>{d.bullish_crosses || 0} bullish crosses · {d.bearish_crosses || 0} bearish crosses</div>
-      </div>
-      <div className="space-y-1 text-xs">
-        {rejections.map(([label, count]) => (
-          <div key={label} className="flex justify-between">
-            <span className="text-gray-300">{label}</span>
-            <span className="font-mono text-gray-400">{count}</span>
+    <div className="card text-xs space-y-3">
+      <h2 className="text-sm font-semibold text-gray-200">Diagnostics</h2>
+
+      <div>
+        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+          DR Directional Bias <span className="text-gray-400 normal-case">
+            (opposite side holds after break)
+          </span>
+        </div>
+        {bias.overall_days ? (
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+            <Stat
+              label="Overall hold rate"
+              value={`${biasOverall.toFixed(1)}% (${bias.overall_held}/${bias.overall_days})`}
+              tone={biasTone}
+            />
+            <Stat
+              label="Bull breaks → low held"
+              value={`${(bias.bull_held_pct ?? 0).toFixed(1)}% (${bias.bull_held}/${bias.bull_break_days})`}
+            />
+            <Stat
+              label="Bear breaks → high held"
+              value={`${(bias.bear_held_pct ?? 0).toFixed(1)}% (${bias.bear_held}/${bias.bear_break_days})`}
+            />
           </div>
-        ))}
+        ) : (
+          <div className="text-gray-500 italic">No breakout days yet — run a longer window.</div>
+        )}
+        <div className="text-[11px] text-gray-500 mt-1 leading-relaxed">
+          The classic DR claim is ~70%. Above this threshold validates the
+          directional edge on your dataset.
+        </div>
       </div>
-      <div className="mt-3 text-[11px] text-gray-500 leading-relaxed border-t border-border pt-2">
-        Common fixes: select more candlestick patterns, widen session times, allow more days,
-        or check that your session timezone matches the data.
+
+      <div className="border-t border-border pt-2">
+        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Day funnel</div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+          <Stat label="Days seen" value={totalDays} />
+          <Stat label="Valid DR days" value={`${validDays} (${pct(validDays, totalDays)})`} />
+          <Stat label="Skipped — narrow" value={d.days_skipped_narrow || 0} />
+          <Stat label="Skipped — wide" value={d.days_skipped_wide || 0} />
+          <Stat label="Skipped — news" value={d.days_skipped_news || 0} />
+          <Stat label="Skipped — day of week" value={d.days_skipped_day_of_week || 0} />
+        </div>
+        {(newsByType.NFP || newsByType.FOMC || newsByType.CPI) ? (
+          <div className="text-[11px] text-gray-500 mt-1">
+            News breakdown: NFP {newsByType.NFP || 0} · FOMC {newsByType.FOMC || 0} · CPI {newsByType.CPI || 0}
+          </div>
+        ) : null}
       </div>
+
+      <div className="border-t border-border pt-2">
+        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Breakouts</div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+          <Stat label="Days with breakout" value={`${breakouts} (${pct(breakouts, validDays)})`} />
+          <Stat label="Bull breaks" value={d.bull_breakouts || 0} tone="good" />
+          <Stat label="Bear breaks" value={d.bear_breakouts || 0} tone="bad" />
+          <Stat
+            label="Avg breakout → entry"
+            value={d.avg_breakout_to_entry_minutes != null
+              ? `${d.avg_breakout_to_entry_minutes.toFixed(1)} min`
+              : '—'}
+          />
+        </div>
+      </div>
+
+      <div className="border-t border-border pt-2">
+        <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Entries</div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+          <Stat label="Via DR retest" value={entries} tone="good" />
+          <Stat label="Via midpoint retest" value={midEntries} />
+          <Stat label="No retest within window" value={d.days_no_retest || 0} />
+          <Stat label="Past last-entry cutoff" value={d.days_past_last_entry || 0} />
+        </div>
+      </div>
+
+      {results.trades?.length === 0 && (
+        <div className="border-t border-border pt-2 text-[11px] text-warn leading-relaxed">
+          Zero trades. Common fixes: widen DR range band, relax retest tolerance,
+          extend retest window, disable confirmation candle, or allow more days.
+        </div>
+      )}
     </div>
   )
 }

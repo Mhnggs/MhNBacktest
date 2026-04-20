@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useBacktestStore } from '../store/useBacktestStore'
 import { getOptimizeOptions, runOptimize } from '../api/client'
-import { SESSION_SCOPES, applySessionScope } from '../util/sessionScope'
 
-const DEFAULT_X = 'stop_loss_pips'
-const DEFAULT_Y = 'risk_reward'
+const DEFAULT_X = 'min_dr_range_pips'
+const DEFAULT_Y = 'retest_tolerance_pips'
 const DEFAULT_METRIC = 'sharpe_ratio'
 
 const METRIC_LABELS = {
@@ -91,13 +90,12 @@ export default function Optimize() {
   const [xParam, setXParam] = useState(DEFAULT_X)
   const [yParam, setYParam] = useState(DEFAULT_Y)
   const [metric, setMetric] = useState(DEFAULT_METRIC)
-  const [sessionScope, setSessionScope] = useState('all')
   const [xStart, setXStart] = useState(10)
-  const [xEnd, setXEnd] = useState(40)
+  const [xEnd, setXEnd] = useState(30)
   const [xStep, setXStep] = useState(5)
-  const [yStart, setYStart] = useState(1.0)
-  const [yEnd, setYEnd] = useState(3.0)
-  const [yStep, setYStep] = useState(0.5)
+  const [yStart, setYStart] = useState(2)
+  const [yEnd, setYEnd] = useState(10)
+  const [yStep, setYStep] = useState(2)
 
   useEffect(() => {
     getOptimizeOptions()
@@ -132,7 +130,7 @@ export default function Optimize() {
     try {
       const data = await runOptimize({
         session_id: sessionId,
-        params: applySessionScope(params, sessionScope),
+        params,
         start_date: startDate || null,
         end_date: endDate || null,
         x_param: xParam,
@@ -194,18 +192,6 @@ export default function Optimize() {
             <select className="input" value={metric} onChange={(e) => setMetric(e.target.value)}>
               {Object.entries(METRIC_LABELS).map(([k, l]) => (
                 <option key={k} value={k}>{l}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <div className="label">Session</div>
-            <select
-              className="input"
-              value={sessionScope}
-              onChange={(e) => setSessionScope(e.target.value)}
-            >
-              {SESSION_SCOPES.map((s) => (
-                <option key={s.key} value={s.key}>{s.label}</option>
               ))}
             </select>
           </div>
